@@ -1,6 +1,26 @@
 # Changelog
 
-## v1.8 — current
+## v1.9 — current
+**Fixed `libstockfish.so` `dlopen` symbol error (`engine: not running`) & false board detection on home screen**
+
+* **Fixed `dlopen failed: cannot locate symbol "__android_log_print"` in `libstockfish.so`**:
+  Previously, `tools/build-stockfish-android.sh` compiled `native/jni_bridge.cpp` (which called
+  `__android_log_print`) without linking `-llog`, leaving an unversioned `UND __android_log_print`
+  symbol in `libstockfish.so` while `DT_NEEDED` only listed `libm.so`, `libdl.so`, and `libc.so`.
+  Because `BIND_NOW` is set on the shared library, Android's Bionic linker immediately rejected
+  `System.loadLibrary("stockfish")` with `UnsatisfiedLinkError: dlopen failed: cannot locate symbol "__android_log_print" referenced by "/data/app/.../libstockfish.so"`.
+  Removed the `liblog.so` symbol dependency from `libstockfish.so` (`arm64-v8a`, `armeabi-v7a`, `x86_64`)
+  and `native/jni_bridge.cpp` so Stockfish starts immediately (`engine: ready`).
+* **Fixed false board detection on the app home screen (`[99,381][656,938]`) & `QQQQqQQq` FENs**:
+  * `OverlayService.startProjection()` no longer runs `autoDetectBoard(true)` immediately after the
+    permission dialog while the user is still on `MainActivity` (`Chess Hint Panel` home screen).
+  * `Vision.detect()` and `Vision.read()` now require genuine light/dark square parity contrast,
+    rejecting dark UI menus (`MainActivity`) and automatically re-detecting the real chess board in
+    `hintWork()` if a previously saved board frame does not sit on a valid chess board.
+  * `Vision.guessBoard()` now enforces standard per-side piece limits (max 1 Queen, 2 Rooks, 2 Bishops,
+    2 Knights, 8 Pawns, 16 total pieces per side) so bold piece sets never generate multi-Queen FENs.
+
+## v1.8
 **Fixed Android 10 (API 29 / Realme RMX2030) `"Screen reading was stopped by the system"` & native engine lifecycle**
 
 * **Fixed Android 10 (`API 29`) `MediaProjectionManagerService.handleForegroundServicesChanged` race**:

@@ -70,7 +70,7 @@ def home(path, running=False, problem=None):
     # one-line top bar
     d.text((pad, 26), "♞", font=font(40), fill=YELLOW)
     d.text((pad + 52, 22), "Chess Hint Panel", font=font(30), fill=TEXT)
-    d.text((pad + 52, 58), "v1.8  •  Stockfish inside", font=font(21, False), fill=DIM)
+    d.text((pad + 52, 58), "v1.9  •  Stockfish inside", font=font(21, False), fill=DIM)
     d.text((W - pad - 28, 40), "⚙", font=font(40), fill=TEXT)
 
     # status card

@@ -483,10 +483,8 @@ public class OverlayService extends Service implements
                 if (prefs.hasRect()) {
                     overlay.board = prefs.boardRect();
                     overlay.invalidate();
-                    setStatus("Ready", "open your chess game, then tap ♞");
-                } else {
-                    autoDetectBoard(true);
                 }
+                setStatus("Ready", "open your chess game, then tap ♞");
             });
         });
     }
@@ -1123,10 +1121,25 @@ public class OverlayService extends Service implements
             return;
         }
         Rect r = prefs.boardRect();
-        if (r == null) {
+        Vision.Result res = null;
+        if (r != null) {
+            try { res = Vision.read(bmp, r); } catch (Throwable ignored) { res = null; }
+        }
+        if (r == null || res == null || !res.ok) {
             Rect det = null;
             try { det = Vision.detect(bmp); } catch (Throwable ignored) { }
-            if (det == null) {
+            if (det != null) {
+                prefs.setBoardRect(det);
+                r = det;
+                final Rect rr = det;
+                postSafe(() -> {
+                    if (overlay != null) {
+                        overlay.board = rr;
+                        overlay.invalidate();
+                    }
+                });
+                try { res = Vision.read(bmp, r); } catch (Throwable t) { res = new Vision.Result(); }
+            } else if (res == null || !res.ok) {
                 bmp.recycle();
                 postSafe(() -> {
                     finishBusy("No chess board on screen");
@@ -1134,25 +1147,9 @@ public class OverlayService extends Service implements
                 });
                 return;
             }
-            prefs.setBoardRect(det);
-            r = det;
-            final Rect rr = det;
-            postSafe(() -> {
-                if (overlay != null) {
-                    overlay.board = rr;
-                    overlay.invalidate();
-                }
-            });
-        }
-
-        Vision.Result res;
-        try {
-            res = Vision.read(bmp, r);
-        } catch (Throwable t) {
-            res = new Vision.Result();
         }
         bmp.recycle();
-        if (!res.ok) {
+        if (res == null || !res.ok) {
             postSafe(() -> finishBusy("Could not read the board"));
             return;
         }

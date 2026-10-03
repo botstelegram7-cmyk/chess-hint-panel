@@ -49,7 +49,7 @@ board**. No root, no hooks into other apps, no internet.
 
 ## 📥 Install in 60 seconds
 
-1. **Download** the APK → [Releases](../../releases/latest) or `apk/ChessHintPanel-v1.8.apk` in this repo.
+1. **Download** the APK → [Releases](../../releases/latest) or `apk/ChessHintPanel-v1.9.apk` in this repo.
 2. Tap it → *"allow installing from this source"* → **Install**.
 3. Open the app:
    * **ALLOW "DISPLAY OVER OTHER APPS"** → toggle **ON**
@@ -114,7 +114,8 @@ java -Djava.library.path=../../build/host -cp classes:../../app/java CoreTest
 
 | Version | APK | What changed |
 |---|---|---|
-| **1.8** *(latest)* | [apk/ChessHintPanel-v1.8.apk](apk/ChessHintPanel-v1.8.apk) | **Fixed Android 10 (API 29 / Realme UI / ColorOS) `"Screen reading was stopped by the system"` & native engine shutdown crash** (bypassed Android 10 `MediaProjectionManagerService.handleForegroundServicesChanged` race, added automatic `MediaProjection` token recovery, moved `createVirtualDisplay` to immediate main-thread init, made `UciEngine` a process-wide singleton on its own thread without sending `"quit"` on service stop, and preserved full multi-entry log history in `CrashGuard`) |
+| **1.9** *(latest)* | [apk/ChessHintPanel-v1.9.apk](apk/ChessHintPanel-v1.9.apk) | **Fixed `libstockfish.so` `dlopen` symbol error (`__android_log_print` without `liblog.so`) & false board detection on the app home screen** (`engine: ready` now starts immediately on all Android devices; stale/non-board rectangles are rejected and automatically re-detected on the real chess board; piece-count limits enforced in `Vision.guessBoard`) |
+| 1.8 | [apk/ChessHintPanel-v1.8.apk](apk/ChessHintPanel-v1.8.apk) | **Fixed Android 10 (API 29 / Realme UI / ColorOS) `"Screen reading was stopped by the system"` & native engine shutdown crash** (bypassed Android 10 `MediaProjectionManagerService.handleForegroundServicesChanged` race, added automatic `MediaProjection` token recovery, moved `createVirtualDisplay` to immediate main-thread init, made `UciEngine` a process-wide singleton on its own thread without sending `"quit"` on service stop, and preserved full multi-entry log history in `CrashGuard`) |
 | 1.7 | [apk/ChessHintPanel-v1.7.apk](apk/ChessHintPanel-v1.7.apk) | **Fixed crash when granting Screen Recording permission** (`MainActivity.onResume()` no longer calls `stopService()` immediately after `onActivityResult()` starts `OverlayService`, eliminating `ForegroundServiceDidNotStartInTimeException`; `ScreenGrab` no longer decodes 60 fps full-screen bitmaps on `onImageAvailable`, decoding lazily on demand inside `grab()`) |
 | 1.6 | [apk/ChessHintPanel-v1.6.apk](apk/ChessHintPanel-v1.6.apk) | **Complete fix for "Could not read the screen"** (`ImageReader` on `chesshint-frames`, row-stride safe buffer copy, static-screen `lastBitmap` cache + SurfaceFlinger nudge, clean capture hiding old marks), **fixed duplicate floating icons & broken STOP** (unregistered `MediaProjection.Callback` before stop, synchronous 0 ms teardown, mid-game/new-game auto recovery) |
 | 1.5 | [apk/ChessHintPanel-v1.5.apk](apk/ChessHintPanel-v1.5.apk) | `acquireLatestImage()` polling fallback, `StopReceiver` broadcast notification STOP, **TEST SCREEN READING** button |

@@ -32,7 +32,7 @@ build_abi () {
   echo "$NDKBIN/$CXX $COMMON $EXTRA -c $ROOT/native/jni_bridge.cpp -o $MK/jni_bridge.o" >> "$MK/cmds.txt"
   xargs -P "$(nproc 2>/dev/null || echo 2)" -I{} bash -c '{}' < "$MK/cmds.txt"
   OBJS=""; for s in $SRCS; do OBJS="$OBJS $MK/$(basename "$s").o"; done
-  $NDKBIN/$CXX -shared -Wl,-soname,libstockfish.so $COMMON $EXTRA $OBJS "$MK/jni_bridge.o" -o "$OUT/libstockfish.so.$NAME"
+  $NDKBIN/$CXX -shared -Wl,-soname,libstockfish.so $COMMON $EXTRA $OBJS "$MK/jni_bridge.o" -llog -o "$OUT/libstockfish.so.$NAME"
   $NDKBIN/llvm-strip --strip-unneeded "$OUT/libstockfish.so.$NAME"
   rm -rf "$MK"
   ls -la "$OUT/libstockfish.so.$NAME"

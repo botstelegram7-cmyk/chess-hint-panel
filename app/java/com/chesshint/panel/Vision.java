@@ -487,6 +487,7 @@ public class Vision {
     }
 
     private static float ratio(float nb, float dg) {
+        if (nb < 0.028f) return 0f;
         float v = (nb - dg) / (nb + dg + 0.004f);
         if (v < 0) v = 0;
         return Math.min(1f, v * 2.2f);
@@ -769,6 +770,13 @@ public class Vision {
         }
         float lmid = (bgLum[0] + bgLum[1]) / 2f;
 
+        // Reject regions that do not have alternating light/dark board squares (e.g. a UI screen or stale rect)
+        if (colDist(bgRgb[0], bgRgb[1]) < 0.032f || colorAltFull(px, w, h, rect) < 0.16f) {
+            res.ok = false;
+            res.note = "not a chess board";
+            return res;
+        }
+
         for (int i = 0; i < 64; i++) {
             // a piece covers a real part of the square AND contains a strongly contrasting pixel;
             // that is what separates a piece from a soft highlight or a move dot.
@@ -868,16 +876,38 @@ public class Vision {
             else if (c8 >= 0 && res.colorPat[c8] == 2) { out.s[c8] = 14; hasBK = true; }
         }
 
-        // Pass 2: assign moved pieces
+        // Pass 2: assign moved pieces while respecting standard piece-count limits
+        // (prevents bold piece themes from turning 15 squares into Queens)
+        int[] wCnt = new int[7], bCnt = new int[7];
+        int wTot = 0, bTot = 0;
+        for (int i = 0; i < 64; i++) {
+            int p = out.s[i];
+            if (p >= 1 && p <= 6) { wCnt[p]++; wTot++; }
+            else if (p >= 9 && p <= 14) { bCnt[p - 8]++; bTot++; }
+        }
+        int[] maxPiece = new int[]{0, 8, 2, 2, 2, 1, 1};
+
         for (int i = 0; i < 64; i++) {
             int col = res.colorPat[i];
             if (col == 0 || out.s[i] != 0) continue;
             boolean isW = (col == 1);
+            if ((isW ? wTot : bTot) >= 16) continue;
+            int[] cnt = isW ? wCnt : bCnt;
             int rank = Board.rankIdxOf(i, whiteBottom);
             int g = guessType(res, i, isW);
             int base = isW ? g : g - 8;
             if (base == 6) base = 5; // kings handled separately
             if (base == 1 && (rank == 0 || rank == 7)) base = 3; // no pawns on 1st/8th rank
+            if (cnt[base] >= maxPiece[base]) {
+                int[] fallbackOrder = (rank == 0 || rank == 7)
+                        ? new int[]{4, 3, 2, 5}
+                        : new int[]{1, 2, 3, 4, 5};
+                for (int fb : fallbackOrder) {
+                    if (cnt[fb] < maxPiece[fb]) { base = fb; break; }
+                }
+            }
+            cnt[base]++;
+            if (isW) wTot++; else bTot++;
             out.s[i] = (byte) (isW ? base : base + 8);
         }
 

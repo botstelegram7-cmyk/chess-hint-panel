@@ -35,8 +35,7 @@
 namespace PSQT { void init(); }
 
 #ifdef __ANDROID__
-#include <android/log.h>
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "chesshint-sf", __VA_ARGS__)
+#define LOGI(...) do {} while (0)
 #else
 #include <cstdio>
 #define LOGI(...) do { std::fprintf(stdout, __VA_ARGS__); std::fprintf(stdout, "\n"); std::fflush(stdout); } while (0)
