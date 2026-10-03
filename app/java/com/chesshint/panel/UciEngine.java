@@ -63,6 +63,15 @@ public class UciEngine {
     public String pollRaw(long ms) throws InterruptedException { return echo.poll(ms, TimeUnit.MILLISECONDS); }
     public boolean isThinking() { return thinking; }
 
+    private int hashMb = 16;
+    private int threadsWanted = 0;
+
+    /** memory / thread budget, decided once at start-up by Tune */
+    public void setBudget(int hashMb, int threads) {
+        this.hashMb = Math.max(8, Math.min(128, hashMb));
+        this.threadsWanted = Math.max(0, threads);
+    }
+
     public synchronized boolean start() {
         if (alive) return true;
         if (!loadLibrary()) return false;
@@ -81,10 +90,10 @@ public class UciEngine {
             nativeWrite("uci");
             String l = hand.poll(5000, TimeUnit.MILLISECONDS);
             if (l == null) { alive = false; return false; }
-            int cores = Runtime.getRuntime().availableProcessors();
-            int threads = Math.max(1, Math.min(4, cores));
+            int threads = threadsWanted > 0 ? threadsWanted
+                    : Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors()));
             nativeWrite("setoption name Threads value " + threads);
-            nativeWrite("setoption name Hash value 16");
+            nativeWrite("setoption name Hash value " + hashMb);
             nativeWrite("setoption name Skill Level value 20");
             nativeWrite("setoption name Ponder value false");
             nativeWrite("isready");

@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.3 — current
+**Screen-recording crash fixed (Android 10–15) + the panel never closes itself**
+* The foreground service / MediaProjection order is now **correct for every Android version**:
+  * API 26–28 — plain foreground service, then `getMediaProjection()`
+  * API 29+ (incl. Android 10, 11, 14, 15) — the media-projection foreground service is started
+    **first**, because `getMediaProjection()` throws `SecurityException` otherwise. This was the
+    regression introduced in 1.2 and it is what closed the app right after the
+    "start recording" dialog on Android 10.
+  * If the platform still disagrees, the service **automatically retries the other order**
+    instead of dying.
+* A capture failure no longer stops the panel: the reason is stored, shown in the app's
+  **PROBLEM** card and in Diagnostics, with a **RETRY SCREEN READING** button and a **Share log**
+  button (opens the Android share sheet with device + Android version + log).
+* New `App` class installs the crash guard before anything else; `Tune` picks the engine hash
+  size (8/16/32 MB) and thread count from the device's real heap limit.
+* Every version of the APK is published in `apk/`.
+
 ## v1.2 — current
 **Reliability release**
 * Fixed the crash when tapping **SHOW MY MOVE** (memory + guard hardened):

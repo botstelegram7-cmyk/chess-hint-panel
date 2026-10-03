@@ -41,6 +41,21 @@ public class CrashGuard {
         }
     }
 
+    /** logs a plain message (no exception) - used for screen-reading problems */
+    public static void note(Context ctx, String where, String message) {
+        try {
+            String line = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())
+                    + "  " + where + "\n" + message + "\ndevice: " + Build.MANUFACTURER + " " + Build.MODEL
+                    + "  android " + Build.VERSION.RELEASE + " (api " + Build.VERSION.SDK_INT + ")\n"
+                    + "--------------------------------------------\n";
+            File f = logFile != null ? logFile : new File(ctx.getFilesDir(), "panel-log.txt");
+            if (f.length() > 24000) f.delete();
+            java.io.FileOutputStream out = new java.io.FileOutputStream(f, true);
+            out.write(line.getBytes("UTF-8"));
+            out.close();
+        } catch (Throwable ignored) { }
+    }
+
     public static void record(Context ctx, String where, Throwable t) {
         try {
             StringWriter sw = new StringWriter();

@@ -78,6 +78,13 @@ public class Ui {
         return t;
     }
 
+    public static TextView sectionTitle2(Context c, String s, int colour) {
+        TextView t = text(c, s, 11.5f, colour, true);
+        t.setLetterSpacing(0.08f);
+        t.setPadding(dp(c, 4), 0, 0, dp(c, 8));
+        return t;
+    }
+
     public static TextView sectionTitle(Context c, String s) {
         TextView t = text(c, s, 11.5f, ACCENT, true);
         t.setLetterSpacing(0.08f);

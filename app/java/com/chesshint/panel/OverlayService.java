@@ -77,6 +77,7 @@ public class OverlayService extends Service implements
     private AndroidView editorHost;
 
     private volatile boolean busy;
+    private String lastProblem = "";
     private boolean windowAdded;
     private int[] lastAutoPattern;
     private String lastStatus;
@@ -103,6 +104,7 @@ public class OverlayService extends Service implements
         worker.post(() -> {
             boolean ok;
             try {
+                engine.setBudget(Tune.EngineBudget.hashMb, Tune.EngineBudget.threads);
                 ok = engine.start();
             } catch (Throwable t) {
                 CrashGuard.record(this, "engine start", t);
@@ -191,37 +193,73 @@ public class OverlayService extends Service implements
     /**
      * Takes the screen-reading token and starts capturing.
      *
-     * Ordering matters and differs per Android version:
-     *   Android 14+ : the media-projection foreground service MUST be running before
-     *                 getMediaProjection(), otherwise the system throws SecurityException.
-     *   Android 8-13: getMediaProjection() first, then startForeground() - on Android 10
-     *                 in particular the service may only become a media-projection service
-     *                 once the projection really exists.
+     * The order is different per Android version and getting it wrong is exactly what made
+     * the panel close right after the "start recording" dialog:
+     *
+     *   API 26-28 : plain foreground service, then getMediaProjection()
+     *   API 29+   : getMediaProjection() THROWS SecurityException unless a foreground service
+     *               with FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION is already running.
+     *               Android 14+ asks for the very same order.
+     *
+     * So: foreground service first, then the projection - and if the platform disagrees we
+     * simply try the other way round instead of dying.
      */
     private void startProjection(Intent intent) {
         int code = intent.getIntExtra(EXTRA_CODE, 0);
         Intent data = intent.getParcelableExtra(EXTRA_DATA);
-        if (data == null) { fail("Screen reading data missing"); return; }
+        if (data == null) { captureProblem("Screen reading data was empty — please try again"); return; }
 
-        final boolean foregroundFirst = Build.VERSION.SDK_INT >= 34;
-        if (foregroundFirst && !goForeground("Starting…")) return;
+        // ---- foreground service first (required from Android 10 on)
+        boolean foregroundFirst = Build.VERSION.SDK_INT >= 29;
+        boolean foregroundDone = false;
+        if (foregroundFirst) {
+            foregroundDone = goForeground("Starting screen reading…");
+        }
 
+        // ---- the projection token
+        String firstError = "";
         try {
             MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
             projection = mpm.getMediaProjection(code, data);
         } catch (Throwable t) {
-            fail("Screen reading was refused: " + t.getMessage());
+            firstError = describe(t);
+            projection = null;
+            CrashGuard.record(this, "getMediaProjection (foreground first)", t);
+        }
+
+        // ---- fall back to the other order if the platform wanted it that way
+        if (projection == null) {
+            if (foregroundDone) {
+                try { stopForeground(true); } catch (Throwable ignored) { }
+                foregroundDone = false;
+            }
+            try {
+                MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+                projection = mpm.getMediaProjection(code, data);
+                if (projection != null && !foregroundDone) {
+                    foregroundDone = goForeground("Starting screen reading…");
+                }
+            } catch (Throwable t) {
+                CrashGuard.record(this, "getMediaProjection (projection first)", t);
+                captureProblem("Screen reading refused: " + describe(t)
+                        + (firstError.isEmpty() ? "" : " / " + firstError));
+                return;
+            }
+        }
+        if (projection == null) {
+            captureProblem("Screen reading permission was not granted");
             return;
         }
-        if (projection == null) { fail("Screen reading permission was not granted"); return; }
-
-        if (!foregroundFirst && !goForeground("Ready — tap the ♞ button")) return;
+        if (!foregroundDone) {
+            // API 26-28, or the fallback path: start it now so the panel survives in background
+            foregroundDone = goForeground("Ready — tap the ♞ button");
+        }
 
         final MediaProjection p = projection;
         try {
             p.registerCallback(new MediaProjection.Callback() {
                 @Override public void onStop() {
-                    main.post(() -> setStatus("Screen reading stopped", "open the app and start again"));
+                    postSafe(() -> captureProblem("Screen reading was stopped by the system — press RETRY"));
                 }
             }, main);
         } catch (Throwable ignored) { }
@@ -229,43 +267,46 @@ public class OverlayService extends Service implements
         worker.post(() -> {
             try {
                 grab = new ScreenGrab(this, p, worker);
-                boolean ok = grab.init();
-                if (!ok) {
+                if (!grab.init()) {
                     final String err = grab.lastError();
-                    main.post(() -> {
+                    postSafe(() -> {
                         ensureWindows();
-                        captureProblem("Screen reading failed" + (err.isEmpty() ? "" : " (" + err + ")"));
+                        captureProblem("Screen capture failed" + (err.isEmpty() ? "" : " (" + err + ")"));
                     });
                     return;
                 }
                 Bitmap first = grab.grabWait(4000);
                 if (first == null) {
-                    main.post(() -> {
+                    postSafe(() -> {
                         ensureWindows();
-                        captureProblem("No picture from the screen yet");
+                        captureProblem("No picture arriving from the screen yet");
                     });
                     return;
                 }
                 first.recycle();
+            } catch (OutOfMemoryError oom) {
+                CrashGuard.record(this, "capture start (memory)", oom);
+                postSafe(() -> captureProblem("Not enough memory — close some apps and press RETRY"));
+                return;
             } catch (Throwable t) {
-                main.post(() -> fail("Screen capture error: " + t.getMessage()));
+                CrashGuard.record(this, "capture start", t);
+                postSafe(() -> captureProblem("Screen capture error: " + describe(t)));
                 return;
             }
-            main.post(() -> {
+            postSafe(() -> {
                 ensureWindows();
                 if (prefs.hasRect()) {
                     overlay.board = prefs.boardRect();
                     overlay.invalidate();
                     setStatus("Ready", "open your chess game, then tap ♞");
                 } else {
-                    // look for a board, but never throw a full screen frame in the user's face
-                    autoDetectBoard(true);
+                    autoDetectBoard(true);   // never opens the frame by itself
                 }
             });
         });
     }
 
-    /** starts the foreground service, with the projection type where the platform supports it */
+    /** starts the foreground service, with the media-projection type where the platform has it */
     private boolean goForeground(String text) {
         try {
             if (Build.VERSION.SDK_INT >= 29) {
@@ -276,16 +317,31 @@ public class OverlayService extends Service implements
             }
             return true;
         } catch (Throwable t) {
-            fail("Could not start the panel service: " + t.getMessage());
+            CrashGuard.record(this, "startForeground", t);
             return false;
         }
     }
 
-    /** keeps the panel alive but tells the user what to do (used for capture problems) */
+    /**
+     * Keeps the panel alive when screen reading has a problem: the reason is stored, shown in
+     * the app's Diagnostics card (so it can be shared) and the bubble stays usable, instead of
+     * the app closing itself.
+     */
     private void captureProblem(String msg) {
-        lastStatus = msg;
-        setStatus(msg, "tap RETRY SCREEN READING in the app");
+        lastProblem = msg;
+        CrashGuard.note(this, "screen reading", msg);
+        setStatus(msg, "open the app → RETRY SCREEN READING");
         toast(msg);
+        ensureWindows();
+    }
+
+    public static String lastProblem() {
+        return INSTANCE == null ? "" : (INSTANCE.lastProblem == null ? "" : INSTANCE.lastProblem);
+    }
+
+    private static String describe(Throwable t) {
+        String m = t.getMessage();
+        return t.getClass().getSimpleName() + (m == null || m.isEmpty() ? "" : ": " + m);
     }
 
     private void fail(String msg) {
@@ -899,6 +955,20 @@ public class OverlayService extends Service implements
     public static void settingsChanged() {
         if (INSTANCE == null) return;
         INSTANCE.main.post(INSTANCE::applySettingsNow);
+    }
+
+    /** stop a dead capture and ask for a fresh permission - used by the RETRY button */
+    public static void retryCapture() {
+        if (INSTANCE == null) return;
+        INSTANCE.main.post(() -> {
+            OverlayService s = INSTANCE;
+            try {
+                if (s.grab != null) { s.grab.release(); s.grab = null; }
+                if (s.projection != null) { s.projection.stop(); s.projection = null; }
+            } catch (Throwable ignored) { }
+            s.lastProblem = "";
+            s.stopSelf();
+        });
     }
 
     public static void requestHintNow() {

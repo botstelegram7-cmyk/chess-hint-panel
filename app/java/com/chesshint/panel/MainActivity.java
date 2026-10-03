@@ -27,7 +27,9 @@ public class MainActivity extends Activity {
     private static final int REQ_NOTIF = 1002;
 
     private Prefs prefs;
-    private TextView statusDot, statusText, statusSub, actionBtn, summary, diagText;
+    private TextView statusDot, statusText, statusSub, actionBtn, summary, diagText, problemText;
+    private LinearLayout problemCard;
+    private boolean problemDismissed;
     private LinearLayout overlayRow, captureRow;
     private boolean captureGranted;
 
@@ -101,6 +103,29 @@ public class MainActivity extends Activity {
         captureRow.setOnClickListener(v -> { if (!OverlayService.isRunning()) onAction(); });
 
         root.addView(card, Ui.lpTop(this, 0, 12));
+
+        // ---- problem card (only visible when something went wrong)
+        problemCard = Ui.card(this);
+        problemCard.setBackground(Ui.round(0xFF2A1620, 0xFF6B2B33, this, 16));
+        problemCard.addView(Ui.sectionTitle2(this, "PROBLEM", 0xFFFF8A99));
+        problemText = Ui.text(this, "", 12.5f, 0xFFFFD5DA, false);
+        problemText.setLineSpacing(Ui.dp(this, 3), 1f);
+        problemCard.addView(problemText, Ui.lpTop(this, 0, 4));
+        LinearLayout pr = Ui.row(this);
+        pr.addView(Ui.primaryButton(this, "RETRY SCREEN READING", 0xFFFF5C6C, 0xFF2A0810, v -> {
+            OverlayService.retryCapture();
+            new android.os.Handler().postDelayed(this::onAction, 900);
+        }), weight());
+        problemCard.addView(pr, Ui.lpTop(this, 0, 10));
+        LinearLayout pr2 = Ui.row(this);
+        pr2.addView(Ui.ghostButton(this, "Share log", v -> shareLog()), weight());
+        pr2.addView(Ui.ghostButton(this, "Dismiss", v -> {
+            problemDismissed = true;
+            refresh();
+        }), weight());
+        problemCard.addView(pr2, Ui.lpTop(this, 0, 8));
+        problemCard.setVisibility(View.GONE);
+        root.addView(problemCard, Ui.lpTop(this, 0, 12));
 
         // ---- shortcuts
         LinearLayout quick = Ui.card(this);
@@ -286,6 +311,13 @@ public class MainActivity extends Activity {
             diagText.setText(info);
         }
 
+        // ---- problem card
+        String problem = OverlayService.lastProblem();
+        if (problem == null || problem.isEmpty()) problem = firstLine(CrashGuard.lastCrash(this));
+        boolean show = problem != null && !problem.isEmpty() && !problemDismissed;
+        problemCard.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (show) problemText.setText(problem);
+
         String styleName = new String[]{"Arrow + rings", "Arrow only", "Rings only", "Squares"}[Math.min(3, prefs.markerStyle())];
         String strength = prefs.elo() <= 0 ? "MAX (superhuman)" : prefs.elo() + " elo";
         String fen = OverlayService.currentFen();
@@ -294,6 +326,35 @@ public class MainActivity extends Activity {
                 + "Me: " + (prefs.whiteBottom() ? "white at the bottom" : "black at the bottom")
                 + "  •  Auto: " + (prefs.auto() ? "on" : "off") + "\n"
                 + (fen == null ? "Position: not tracked yet" : "Position: " + fen));
+    }
+
+    private static String firstLine(String s) {
+        if (s == null) return "";
+        int i = s.indexOf('\n');
+        return i < 0 ? s.trim() : s.substring(0, i).trim();
+    }
+
+    /** opens the Android share sheet with the full log - so a problem can be reported easily */
+    private void shareLog() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("Chess Hint Panel ").append("1.3").append("\n");
+            sb.append("android ").append(android.os.Build.VERSION.RELEASE)
+              .append(" (api ").append(android.os.Build.VERSION.SDK_INT).append(")\n");
+            sb.append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL).append("\n\n");
+            String p = OverlayService.lastProblem();
+            if (p != null && !p.isEmpty()) sb.append("problem: ").append(p).append("\n\n");
+            sb.append(OverlayService.diagnostics()).append("\n\n");
+            String log = CrashGuard.lastCrash(this);
+            if (log != null && !log.isEmpty()) sb.append("log:\n").append(log);
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType("text/plain");
+            i.putExtra(Intent.EXTRA_SUBJECT, "Chess Hint Panel log");
+            i.putExtra(Intent.EXTRA_TEXT, sb.toString());
+            startActivity(Intent.createChooser(i, "Share log"));
+        } catch (Throwable t) {
+            toast("Could not open the share sheet");
+        }
     }
 
     private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
