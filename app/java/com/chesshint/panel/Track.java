@@ -56,67 +56,73 @@ public class Track {
     public Update observe(int[] observed, float[] conf) {
         Update u = new Update();
         int[] cur = Chess.pattern(pos, whiteBottom);
-        if (Arrays.equals(cur, observed)) return u;
+        if (Arrays.equals(cur, observed)) {
+            u.ok = true;
+            return u;
+        }
         u.changed = true;
 
-        // ---- build a list of plausible corrected readings (the reader is never perfect)
-        List<int[]> variants = new ArrayList<>();
-        variants.add(observed);
+        // First try exact observation (0 flipped squares) from current side to move
+        if (tryTarget(u, cur, observed, observed, 0, false)) return u;
 
+        // Next try exact observation (0 flipped squares) with flipped side to move
+        // (handles the case where the opponent moved while pos.side was out of sync)
+        if (tryTarget(u, cur, observed, observed, 0, true)) return u;
+
+        // ---- build a list of plausible 1-square corrected readings for genuinely borderline squares
         Integer[] order = new Integer[64];
         for (int i = 0; i < 64; i++) order[i] = i;
         Arrays.sort(order, (a, b) -> Float.compare(conf[a], conf[b]));   // least certain first
 
-        List<Integer> weak = new ArrayList<>();
-        for (int k = 0; k < 10 && k < 64; k++) {
+        for (int k = 0; k < 6 && k < 64; k++) {
             int i = order[k];
-            if (conf[i] < 0.50f) weak.add(i);
-        }
-        // one square corrected (white / empty / black - whichever was not read)
-        for (int i : weak)
-            for (int v = 0; v < 3; v++)
-                if (v != observed[i]) variants.add(set(observed, i, v));
-
-        // two squares corrected at once (only the most doubtful ones)
-        int lim = Math.min(5, weak.size());
-        for (int a = 0; a < lim; a++)
-            for (int b = a + 1; b < lim; b++) {
-                int ia = weak.get(a), ib = weak.get(b);
-                for (int va = 0; va < 3; va++) {
-                    if (va == observed[ia]) continue;
-                    for (int vb = 0; vb < 3; vb++) {
-                        if (vb == observed[ib]) continue;
-                        variants.add(set(set(observed, ia, va), ib, vb));
-                    }
+            if (conf[i] >= 0.28f) break;
+            for (int v = 0; v < 3; v++) {
+                if (v == observed[i]) continue;
+                int[] target = set(observed, i, v);
+                if (Arrays.equals(cur, target)) {
+                    u.ok = true;
+                    u.changed = false;
+                    u.fixedSquares = 1;
+                    return u;
                 }
+                if (tryTarget(u, cur, observed, target, 1, false)) return u;
+                if (tryTarget(u, cur, observed, target, 1, true)) return u;
             }
-
-        for (int v = 0; v < variants.size(); v++) {
-            int[] target = variants.get(v);
-            List<List<Chess.Move>> found = search(target, 1);
-            int depth = 1;
-            if (found.isEmpty()) { found = search(target, 2); depth = 2; }
-            int diff = 0;
-            for (int i = 0; i < 64; i++) if (cur[i] != target[i]) diff++;
-            if (found.isEmpty() && diff >= 4) { found = search(target, 3); depth = 3; }
-            if (found.isEmpty() && diff >= 7) { found = search(target, 4); depth = 4; }
-            if (found.isEmpty()) continue;
-
-            List<Chess.Move> seq = found.get(0);
-            for (Chess.Move m : seq) { Chess.make(pos, m); history.add(m); }
-            lastPattern = target;
-            u.ok = true;
-            u.moves = seq;
-            u.ambiguous = found.size() > 1;
-            u.fixedSquares = v == 0 ? 0 : countDiff(observed, target);
-            StringBuilder sb = new StringBuilder();
-            for (Chess.Move m : seq) sb.append(m.uci()).append(' ');
-            u.info = sb.toString().trim();
-            lastInfo = u.info;
-            return u;
         }
         u.ok = false;
         return u;
+    }
+
+    private boolean tryTarget(Update u, int[] cur, int[] observed, int[] target, int fixed, boolean flipSide) {
+        Chess.Pos base = pos.copy();
+        if (flipSide) {
+            base.side = 3 - base.side;
+            base.epSq = -1;
+            Chess.sanitize(base);
+        }
+        int diff = countDiff(cur, target);
+        if (diff == 0) return false;
+        List<List<Chess.Move>> found = searchFrom(base, target, 1);
+        if (fixed == 0 && found.isEmpty()) found = searchFrom(base, target, 2);
+        if (fixed == 0 && found.isEmpty() && diff >= 3) found = searchFrom(base, target, 3);
+        if (fixed == 0 && found.isEmpty() && diff >= 4 && !flipSide) found = searchFrom(base, target, 4);
+        if (found.isEmpty()) return false;
+
+        List<Chess.Move> seq = found.get(0);
+        pos = base;
+        for (Chess.Move m : seq) { Chess.make(pos, m); history.add(m); }
+        Chess.sanitize(pos);
+        lastPattern = target;
+        u.ok = true;
+        u.moves = seq;
+        u.ambiguous = found.size() > 1;
+        u.fixedSquares = fixed;
+        StringBuilder sb = new StringBuilder();
+        for (Chess.Move m : seq) sb.append(m.uci()).append(' ');
+        u.info = sb.toString().trim();
+        lastInfo = u.info;
+        return true;
     }
 
     private static int countDiff(int[] a, int[] b) {
@@ -136,10 +142,10 @@ public class Track {
      * exactly the observed picture.  Only moves that touch a square which still differs are
      * tried, which keeps the search tiny even 3-4 plies deep.
      */
-    private List<List<Chess.Move>> search(int[] target, int depth) {
+    private List<List<Chess.Move>> searchFrom(Chess.Pos startPos, int[] target, int depth) {
         List<List<Chess.Move>> out = new ArrayList<>();
         int[] budget = new int[]{200000};
-        rec(pos.copy(), target, depth, new ArrayList<Chess.Move>(), out, budget);
+        rec(startPos.copy(), target, depth, new ArrayList<Chess.Move>(), out, budget);
         return out;
     }
 

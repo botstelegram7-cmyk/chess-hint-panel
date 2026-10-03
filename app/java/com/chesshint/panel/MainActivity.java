@@ -73,7 +73,7 @@ public class MainActivity extends Activity {
         bar.addView(icon);
         LinearLayout titles = Ui.column(this);
         titles.addView(Ui.text(this, "Chess Hint Panel", 15.5f, Ui.TEXT, true));
-        titles.addView(Ui.text(this, "v1.9  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
+        titles.addView(Ui.text(this, "v2.0  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
         bar.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView gear = Ui.text(this, "\u2699", 22f, Ui.TEXT, false);
         gear.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 4), 0);

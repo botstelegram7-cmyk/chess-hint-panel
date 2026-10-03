@@ -182,8 +182,9 @@ public class Vision {
     public static Rect detect(int[] pxFull, int W0, int H0) {
         if (pxFull == null || W0 < 64 || H0 < 64) return null;
 
-        float sc = Math.min(1f, 420f / W0);
-        int W = Math.max(80, Math.round(W0 * sc));
+        float sc0 = Math.min(1f, 416f / W0);
+        int W = Math.max(80, (Math.round(W0 * sc0) / 8) * 8);
+        float sc = W / (float) W0;
         int H = Math.max(80, Math.round(H0 * sc));
         int[] px;
         if (W == W0 && H == H0) px = pxFull;
@@ -232,13 +233,25 @@ public class Vision {
             for (int x0 = 0; x0 + side <= W; x0 += step) {
                 for (int y0 = 0; y0 + side <= H; y0 += step) {
                     float ls = 0, ms = 0;
-                    for (int k = 0; k <= 8; k++) ls += colS[Math.min(W - 1, x0 + Math.min(W - 1, k * s))];
+                    int lCnt = 0;
+                    for (int k = 0; k <= 8; k++) {
+                        int xx = x0 + k * s;
+                        if (xx <= 1 || xx >= W - 2) continue;
+                        ls += colS[xx];
+                        lCnt++;
+                    }
                     for (int k = 0; k < 8; k++) ms += colS[Math.min(W - 1, x0 + (int) ((k + 0.5f) * s))];
-                    ls /= 9f; ms /= 8f;
+                    ls /= Math.max(1, lCnt); ms /= 8f;
                     float lr = 0, mr = 0;
-                    for (int k = 0; k <= 8; k++) lr += rowS[Math.min(H - 1, y0 + Math.min(H - 1, k * s))];
+                    int rCnt = 0;
+                    for (int k = 0; k <= 8; k++) {
+                        int yy = y0 + k * s;
+                        if (yy <= 1 || yy >= H - 2) continue;
+                        lr += rowS[yy];
+                        rCnt++;
+                    }
                     for (int k = 0; k < 8; k++) mr += rowS[Math.min(H - 1, y0 + (int) ((k + 0.5f) * s))];
-                    lr /= 9f; mr /= 8f;
+                    lr /= Math.max(1, rCnt); mr /= 8f;
                     float base = (ls + lr) / 2f, mid = (ms + mr) / 2f;
                     float contrast = (base - mid) / (base + 0.002f);
                     if (contrast > 0.05f) cands.add(new Cand(s, x0, y0, contrast));
@@ -255,23 +268,24 @@ public class Vision {
         for (int i = 0; i < n; i++) {
             Cand c = cands.get(i);
             float alt = colorAlt(px, W, H, c.s, c.x, c.y);
-            top[i] = new Candidate(c.x, c.y, c.s, 0.45f * (c.score / maxCon) + 0.55f * alt, alt);
+            top[i] = new Candidate(c.x, c.y, c.s, 0.40f * (c.score / maxCon) + 0.60f * alt, alt);
         }
         java.util.Arrays.sort(top, (a, b) -> Float.compare(b.score, a.score));
 
         // ---- take the best few up to full resolution and hill climb on the real pixels
         Rect bestRect = null;
         float bestScore = -1;
-        int tries = Math.min(10, top.length);
+        int tries = Math.min(12, top.length);
         for (int i = 0; i < tries; i++) {
             Candidate c = top[i];
             int fx = Math.round(c.x / sc), fy = Math.round(c.y / sc), fs = Math.round(8 * c.s / sc);
             if (fs < 64) continue;
+            if (fx <= 6 && fx + fs >= W0 - 6) { fx = 0; fs = W0; }
             Rect r = new Rect(fx, fy, fx + fs, fy + fs);
             r = alignBoard(pxFull, W0, H0, r);
             float alt = colorAltFull(pxFull, W0, H0, r);
             if (alt < 0.24f) continue;                     // no checkerboard -> not a board
-            float sc2 = frameScore(pxFull, W0, H0, r) + 0.15f * (c.score / maxCon);
+            float sc2 = frameScore(pxFull, W0, H0, r) + 0.12f * (c.score / maxCon);
             if (sc2 > bestScore) { bestScore = sc2; bestRect = r; }
         }
         if (bestRect == null || bestScore < 0.42f) return null;   // nothing board-like here
@@ -297,16 +311,21 @@ public class Vision {
 
     /** contrast across the 7 internal vertical grid lines; sharp only when the frame sits on the board */
     private static float vLines(int[] px, int W, int H, int x0, int y0, int side) {
+        return vLines(px, W, H, x0, y0, side, 0.11f);
+    }
+
+    private static float vLines(int[] px, int W, int H, int x0, int y0, int side, float dFrac) {
         float sq = side / 8f;
+        int d = Math.max(2, Math.round(sq * dFrac));
         float[] pair = new float[5];
         float total = 0; int cnt = 0;
         for (int line = 1; line <= 7; line++) {
             int lx = x0 + Math.round(line * sq);
             for (int row = 0; row < 8; row++) {
                 for (int k = 0; k < 5; k++) {
-                    int yy = clampI(y0 + Math.round(row * sq + sq * (0.16f + 0.17f * k)), 0, H - 1);
-                    int xl = clampI(lx - Math.max(2, Math.round(sq * 0.14f)), 0, W - 1);
-                    int xr = clampI(lx + Math.max(2, Math.round(sq * 0.14f)), 0, W - 1);
+                    int yy = clampI(y0 + Math.round(row * sq + sq * (0.18f + 0.16f * k)), 0, H - 1);
+                    int xl = clampI(lx - d, 0, W - 1);
+                    int xr = clampI(lx + d, 0, W - 1);
                     pair[k] = colDist(px[yy * W + xl], px[yy * W + xr]);
                 }
                 total += med(pair, 5); cnt++;
@@ -316,16 +335,21 @@ public class Vision {
     }
 
     private static float hLines(int[] px, int W, int H, int x0, int y0, int side) {
+        return hLines(px, W, H, x0, y0, side, 0.11f);
+    }
+
+    private static float hLines(int[] px, int W, int H, int x0, int y0, int side, float dFrac) {
         float sq = side / 8f;
+        int d = Math.max(2, Math.round(sq * dFrac));
         float[] pair = new float[5];
         float total = 0; int cnt = 0;
         for (int line = 1; line <= 7; line++) {
             int ly = y0 + Math.round(line * sq);
             for (int col = 0; col < 8; col++) {
                 for (int k = 0; k < 5; k++) {
-                    int xx = clampI(x0 + Math.round(col * sq + sq * (0.16f + 0.17f * k)), 0, W - 1);
-                    int yu = clampI(ly - Math.max(2, Math.round(sq * 0.14f)), 0, H - 1);
-                    int yd = clampI(ly + Math.max(2, Math.round(sq * 0.14f)), 0, H - 1);
+                    int xx = clampI(x0 + Math.round(col * sq + sq * (0.18f + 0.16f * k)), 0, W - 1);
+                    int yu = clampI(ly - d, 0, H - 1);
+                    int yd = clampI(ly + d, 0, H - 1);
                     pair[k] = colDist(px[yu * W + xx], px[yd * W + xx]);
                 }
                 total += med(pair, 5); cnt++;
@@ -337,34 +361,46 @@ public class Vision {
     /** does the frame border fall on a real edge of the board? */
     private static float perimeter(int[] px, int W, int H, int x0, int y0, int side) {
         float sq = side / 8f;
-        int d = Math.max(2, Math.round(sq * 0.16f));
+        int d = Math.max(2, Math.round(sq * 0.10f));
         float[] v = new float[8];
         float tot = 0; int n = 0;
-        for (int row = 0; row < 8; row++) {
-            int yy = clampI(y0 + Math.round((row + 0.5f) * sq), 0, H - 1);
-            v[row] = colDist(px[yy * W + clampI(x0 - d, 0, W - 1)], px[yy * W + clampI(x0 + d, 0, W - 1)]);
+        if (x0 - d >= 0) {
+            for (int row = 0; row < 8; row++) {
+                int yy = clampI(y0 + Math.round((row + 0.5f) * sq), 0, H - 1);
+                v[row] = colDist(px[yy * W + clampI(x0 - d, 0, W - 1)], px[yy * W + clampI(x0 + d, 0, W - 1)]);
+            }
+            tot += med(v, 8); n++;
         }
-        tot += med(v, 8); n++;
-        for (int row = 0; row < 8; row++) {
-            int yy = clampI(y0 + Math.round((row + 0.5f) * sq), 0, H - 1);
-            v[row] = colDist(px[yy * W + clampI(x0 + side - d, 0, W - 1)], px[yy * W + clampI(x0 + side + d, 0, W - 1)]);
+        if (x0 + side + d < W) {
+            for (int row = 0; row < 8; row++) {
+                int yy = clampI(y0 + Math.round((row + 0.5f) * sq), 0, H - 1);
+                v[row] = colDist(px[yy * W + clampI(x0 + side - d, 0, W - 1)], px[yy * W + clampI(x0 + side + d, 0, W - 1)]);
+            }
+            tot += med(v, 8); n++;
         }
-        tot += med(v, 8); n++;
-        for (int col = 0; col < 8; col++) {
-            int xx = clampI(x0 + Math.round((col + 0.5f) * sq), 0, W - 1);
-            v[col] = colDist(px[clampI(y0 - d, 0, H - 1) * W + xx], px[clampI(y0 + d, 0, H - 1) * W + xx]);
+        if (y0 - d >= 0) {
+            for (int col = 0; col < 8; col++) {
+                int xx = clampI(x0 + Math.round((col + 0.5f) * sq), 0, W - 1);
+                v[col] = colDist(px[clampI(y0 - d, 0, H - 1) * W + xx], px[clampI(y0 + d, 0, H - 1) * W + xx]);
+            }
+            tot += med(v, 8); n++;
         }
-        tot += med(v, 8); n++;
-        for (int col = 0; col < 8; col++) {
-            int xx = clampI(x0 + Math.round((col + 0.5f) * sq), 0, W - 1);
-            v[col] = colDist(px[clampI(y0 + side - d, 0, H - 1) * W + xx], px[clampI(y0 + side + d, 0, H - 1) * W + xx]);
+        if (y0 + side + d < H) {
+            for (int col = 0; col < 8; col++) {
+                int xx = clampI(x0 + Math.round((col + 0.5f) * sq), 0, W - 1);
+                v[col] = colDist(px[clampI(y0 + side - d, 0, H - 1) * W + xx], px[clampI(y0 + side + d, 0, H - 1) * W + xx]);
+            }
+            tot += med(v, 8); n++;
         }
-        tot += med(v, 8); n++;
-        return tot / n;
+        return n > 0 ? tot / n : 0f;
     }
 
     /** 1D search over one axis using the grid-line contrast */
     private static int[] axisSearch(int[] px, int W, int H, boolean vertical, int x0, int y0, int side, int range) {
+        return axisSearch(px, W, H, vertical, x0, y0, side, range, 0.12f);
+    }
+
+    private static int[] axisSearch(int[] px, int W, int H, boolean vertical, int x0, int y0, int side, int range, float dFrac) {
         int bestV = vertical ? x0 : y0;
         float bestS = -1;
         int step = Math.max(1, range / 4);
@@ -374,7 +410,7 @@ public class Vision {
                 int v = bestV + o;
                 int xx = vertical ? v : x0, yy = vertical ? y0 : v;
                 if (xx < 0 || yy < 0 || xx + side > W || yy + side > H) continue;
-                float sc = (vertical ? vLines(px, W, H, xx, yy, side) : hLines(px, W, H, xx, yy, side))
+                float sc = (vertical ? vLines(px, W, H, xx, yy, side, dFrac) : hLines(px, W, H, xx, yy, side, dFrac))
                         + 0.55f * perimeter(px, W, H, xx, yy, side);
                 if (sc > bestS) { bestS = sc; bestV = v; }
             }
@@ -391,9 +427,11 @@ public class Vision {
     private static Rect alignBoard(int[] px, int W, int H, Rect r, int range) {
         int x = r.left, y = r.top, side = r.width();
         for (int pass = 0; pass < 2; pass++) {
-            int[] a = axisSearch(px, W, H, true, x, y, side, range);
+            float df = (pass == 0) ? 0.13f : 0.045f;
+            int rPass = (pass == 0) ? range : Math.max(4, side / 32);
+            int[] a = axisSearch(px, W, H, true, x, y, side, rPass, df);
             x = a[0]; y = a[1];
-            a = axisSearch(px, W, H, false, x, y, side, range);
+            a = axisSearch(px, W, H, false, x, y, side, rPass, df);
             x = a[0]; y = a[1];
             // pitch
             int bestS = side;
@@ -404,14 +442,43 @@ public class Vision {
                 for (int o = -2 * s; o <= 2 * s; o += s) {
                     int ns = bestS + o;
                     if (ns < 64 || x + ns > W || y + ns > H) continue;
-                    float sc = vLines(px, W, H, x, y, ns) + hLines(px, W, H, x, y, ns);
+                    float sc = vLines(px, W, H, x, y, ns, df) + hLines(px, W, H, x, y, ns, df);
                     if (sc > bestSc) { bestSc = sc; bestS = ns; }
                 }
                 if (bs == bestS && s == 1) break;
             }
             side = bestS;
         }
-        return new Rect(x, y, x + side, y + side);
+        Rect bestR = new Rect(x, y, x + side, y + side);
+        float bestF = frameScore(px, W, H, bestR);
+
+        // Check +/- 1 or 2 square shifts along Y and X (escapes 1-rank periodic local minima!)
+        int sq = Math.max(8, Math.round(side / 8f));
+        for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                int nx = x + dx * sq, ny = y + dy * sq;
+                if (nx < 0 || ny < 0 || nx + side > W || ny + side > H) continue;
+                int[] ay = axisSearch(px, W, H, false, nx, ny, side, Math.max(4, sq / 4), 0.045f);
+                Rect cand = new Rect(nx, ay[1], nx + side, ay[1] + side);
+                float f = frameScore(px, W, H, cand);
+                if (f > bestF) { bestF = f; bestR = cand; }
+            }
+        }
+
+        // Also check full-width board (x = 0, side = W) when board is nearly full width
+        if (side >= W * 0.88f && W <= H) {
+            int fwSq = Math.max(8, Math.round(W / 8f));
+            int baseY = bestR.top;
+            for (int dy = -2; dy <= 2; dy++) {
+                int ny = clampI(baseY + dy * fwSq, 0, H - W);
+                int[] ay = axisSearch(px, W, H, false, 0, ny, W, Math.max(4, fwSq / 3), 0.045f);
+                Rect cand = new Rect(0, ay[1], W, ay[1] + W);
+                float f = frameScore(px, W, H, cand);
+                if (f > bestF) { bestF = f; bestR = cand; }
+            }
+        }
+        return bestR;
     }
 
     /** final quality of a frame: line contrast + board edge + colour alternation */
@@ -420,7 +487,7 @@ public class Vision {
         float lines = (vLines(px, W, H, r.left, r.top, r.width()) + hLines(px, W, H, r.left, r.top, r.width())) / 2f;
         float per = perimeter(px, W, H, r.left, r.top, r.width());
         float alt = colorAltFull(px, W, H, r);
-        return 0.46f * lines * 3.2f + 0.24f * per + 0.30f * alt;
+        return 0.42f * lines * 3.2f + 0.22f * per + 0.36f * alt;
     }
 
     /** local search: move/scale the frame until the squares alternate best */
@@ -449,6 +516,68 @@ public class Vision {
         return new int[]{x0, y0, size};
     }
 
+    /**
+     * Samples the background RGB of a single square [x0..x1, y0..y1] using its 4 corners,
+     * picking the closest-matching pair of corners so neither a large central piece nor a
+     * corner coordinate label (8..1 / a..h) pollutes the background colour.
+     */
+    private static void sampleSquareBg(int[] px, int W, int H, int x0, int y0, int x1, int y1, float[] outRgb) {
+        int wS = Math.max(2, x1 - x0), hS = Math.max(2, y1 - y0);
+        int pw = Math.max(1, Math.round(wS * 0.14f));
+        int in = Math.max(1, Math.round(wS * 0.06f));
+        float[] cr = new float[4], cg = new float[4], cb = new float[4];
+        int k = 0;
+        for (int cy = 0; cy < 2; cy++) {
+            for (int cx = 0; cx < 2; cx++) {
+                int bx = (cx == 0) ? (x0 + in) : Math.max(x0, x1 - in - pw);
+                int by = (cy == 0) ? (y0 + in) : Math.max(y0, y1 - in - pw);
+                long sr = 0, sg = 0, sb = 0;
+                int cnt = 0;
+                for (int y = by; y < by + pw; y++) {
+                    if (y < 0 || y >= H) continue;
+                    int rowOff = y * W;
+                    for (int x = bx; x < bx + pw; x++) {
+                        if (x < 0 || x >= W) continue;
+                        int c = px[rowOff + x];
+                        sr += (c >> 16) & 255;
+                        sg += (c >> 8) & 255;
+                        sb += c & 255;
+                        cnt++;
+                    }
+                }
+                if (cnt == 0) cnt = 1;
+                cr[k] = sr / (float) cnt;
+                cg[k] = sg / (float) cnt;
+                cb[k] = sb / (float) cnt;
+                k++;
+            }
+        }
+        int bestA = 0, bestB = 1;
+        float bestD = Float.MAX_VALUE;
+        for (int a = 0; a < 4; a++) {
+            for (int b = a + 1; b < 4; b++) {
+                float d = Math.abs(cr[a] - cr[b]) + Math.abs(cg[a] - cg[b]) + Math.abs(cb[a] - cb[b]);
+                if (d < bestD) { bestD = d; bestA = a; bestB = b; }
+            }
+        }
+        float mr = (cr[bestA] + cr[bestB]) * 0.5f;
+        float mg = (cg[bestA] + cg[bestB]) * 0.5f;
+        float mb = (cb[bestA] + cb[bestB]) * 0.5f;
+        float sumR = cr[bestA] + cr[bestB], sumG = cg[bestA] + cg[bestB], sumB = cb[bestA] + cb[bestB];
+        int n = 2;
+        for (int i = 0; i < 4; i++) {
+            if (i == bestA || i == bestB) continue;
+            float d = Math.abs(cr[i] - mr) + Math.abs(cg[i] - mg) + Math.abs(cb[i] - mb);
+            if (d < 24f) {
+                sumR += cr[i]; sumG += cg[i]; sumB += cb[i];
+                n++;
+            }
+        }
+        outRgb[0] = sumR / n;
+        outRgb[1] = sumG / n;
+        outRgb[2] = sumB / n;
+    }
+
     private static float colorAltFull(int[] px, int W, int H, Rect r) {
         int side = r.width();
         if (side < 64 || r.left < 0 || r.top < 0 || r.right > W || r.bottom > H) return 0;
@@ -456,30 +585,40 @@ public class Vision {
         for (int rr = 0; rr < 8; rr++)
             for (int ff = 0; ff < 8; ff++) {
                 int x0 = r.left + Math.round(ff * side / 8f), y0 = r.top + Math.round(rr * side / 8f);
-                int sq = side / 8;
-                int step = Math.max(1, sq / 8);
-                long sr = 0, sg = 0, sb = 0; int cnt = 0;
-                for (int y = y0 + sq / 4; y < y0 + sq * 3 / 4; y += step)
-                    for (int x = x0 + sq / 4; x < x0 + sq * 3 / 4; x += step) {
-                        if (x < 0 || y < 0 || x >= W || y >= H) continue;
-                        int c = px[y * W + x];
-                        sr += (c >> 16) & 255; sg += (c >> 8) & 255; sb += c & 255; cnt++;
-                    }
-                cnt = Math.max(1, cnt);
-                m[rr * 8 + ff][0] = sr / cnt; m[rr * 8 + ff][1] = sg / cnt; m[rr * 8 + ff][2] = sb / cnt;
+                int x1 = r.left + Math.round((ff + 1) * side / 8f), y1 = r.top + Math.round((rr + 1) * side / 8f);
+                sampleSquareBg(px, W, H, x0, y0, x1, y1, m[rr * 8 + ff]);
             }
+        return gridAlternationScore(m);
+    }
+
+    private static float gridAlternationScore(float[][] m) {
         float nb = 0; int nbc = 0; float dg = 0; int dgc = 0;
+        float[] rowNb = new float[8], colNb = new float[8];
         for (int rr = 0; rr < 8; rr++)
             for (int ff = 0; ff < 8; ff++) {
                 float[] a = m[rr * 8 + ff];
-                if (ff < 7) { nb += dist(a, m[rr * 8 + ff + 1]); nbc++; }
-                if (rr < 7) { nb += dist(a, m[(rr + 1) * 8 + ff]); nbc++; }
+                if (ff < 7) {
+                    float d = dist(a, m[rr * 8 + ff + 1]);
+                    nb += d; nbc++;
+                    rowNb[rr] += d / 7f;
+                }
+                if (rr < 7) {
+                    float d = dist(a, m[(rr + 1) * 8 + ff]);
+                    nb += d; nbc++;
+                    colNb[ff] += d / 7f;
+                }
                 if (rr < 7 && ff < 7) {
                     dg += dist(a, m[(rr + 1) * 8 + ff + 1]); dgc++;
                     dg += dist(m[rr * 8 + ff + 1], m[(rr + 1) * 8 + ff]); dgc++;
                 }
             }
-        return ratio(nb / Math.max(1, nbc), dg / Math.max(1, dgc));
+        float meanNb = nb / Math.max(1, nbc);
+        float base = ratio(meanNb, dg / Math.max(1, dgc));
+        if (base <= 0f) return 0f;
+        // Every outer rank (0 and 7) and outer file (0 and 7) on a real 8x8 chessboard alternates!
+        float minOuter = Math.min(Math.min(rowNb[0], rowNb[7]), Math.min(colNb[0], colNb[7]));
+        float outerPenalty = Math.min(1f, minOuter / Math.max(0.015f, meanNb * 0.55f));
+        return base * outerPenalty;
     }
 
     private static float dist(float[] a, float[] b) {
@@ -495,10 +634,13 @@ public class Vision {
 
     /** colour alternation of a candidate grid on the downscaled image */
     private static float colorAlt(int[] px, int W, int H, int s, int x0, int y0) {
-        float[][] m = new float[64][3];
+        float[][] mc = new float[64][3];
+        float[][] mm = new float[64][3];
         int step = Math.max(1, s / 8);
         for (int r = 0; r < 8; r++)
             for (int f = 0; f < 8; f++) {
+                int sx0 = x0 + f * s, sy0 = y0 + r * s;
+                sampleSquareBg(px, W, H, sx0, sy0, sx0 + s, sy0 + s, mc[r * 8 + f]);
                 int cx = x0 + (int) ((f + 0.5f) * s), cy = y0 + (int) ((r + 0.5f) * s);
                 long sr = 0, sg = 0, sb = 0; int cnt = 0;
                 for (int y = cy - s / 4; y <= cy + s / 4; y += step) {
@@ -510,20 +652,23 @@ public class Vision {
                     }
                 }
                 if (cnt == 0) cnt = 1;
-                m[r * 8 + f][0] = sr / cnt; m[r * 8 + f][1] = sg / cnt; m[r * 8 + f][2] = sb / cnt;
+                mm[r * 8 + f][0] = sr / (float) cnt;
+                mm[r * 8 + f][1] = sg / (float) cnt;
+                mm[r * 8 + f][2] = sb / (float) cnt;
             }
         float nb = 0; int nbc = 0; float dg = 0; int dgc = 0;
         for (int r = 0; r < 8; r++)
             for (int f = 0; f < 8; f++) {
-                float[] a = m[r * 8 + f];
-                if (f < 7) { nb += dist(a, m[r * 8 + f + 1]); nbc++; }
-                if (r < 7) { nb += dist(a, m[(r + 1) * 8 + f]); nbc++; }
+                float[] a = mm[r * 8 + f];
+                if (f < 7) { nb += dist(a, mm[r * 8 + f + 1]); nbc++; }
+                if (r < 7) { nb += dist(a, mm[(r + 1) * 8 + f]); nbc++; }
                 if (r < 7 && f < 7) {
-                    dg += dist(a, m[(r + 1) * 8 + f + 1]); dgc++;
-                    dg += dist(m[r * 8 + f + 1], m[(r + 1) * 8 + f]); dgc++;
+                    dg += dist(a, mm[(r + 1) * 8 + f + 1]); dgc++;
+                    dg += dist(mm[r * 8 + f + 1], mm[(r + 1) * 8 + f]); dgc++;
                 }
             }
-        return ratio(nb / Math.max(1, nbc), dg / Math.max(1, dgc));
+        float midAlt = ratio(nb / Math.max(1, nbc), dg / Math.max(1, dgc));
+        return Math.max(gridAlternationScore(mc), midAlt);
     }
 
     private static class Candidate {
@@ -606,25 +751,10 @@ public class Vision {
                 int x1 = Math.round((f + 1) * sqw), y1 = Math.round((r + 1) * sqh);
                 int wS = Math.max(1, x1 - x0), hS = Math.max(1, y1 - y0);
 
-                // --- the square's own background = mean of four corner patches
-                int pw = Math.max(2, Math.round(wS * 0.12f));
-                int in = Math.max(1, Math.round(wS * 0.06f));
-                long cr = 0, cg = 0, cb = 0;
-                int cn = 0;
-                for (int cy = 0; cy < 2; cy++)
-                    for (int cx = 0; cx < 2; cx++) {
-                        int bx = cx == 0 ? x0 + in : x1 - in - pw;
-                        int by = cy == 0 ? y0 + in : y1 - in - pw;
-                        for (int y = by; y < by + pw; y++)
-                            for (int x = bx; x < bx + pw; x++) {
-                                if (x < 0 || y < 0 || x >= bw || y >= bh) continue;
-                                int c = px[(rect.top + y) * w + rect.left + x];
-                                cr += (c >> 16) & 255; cg += (c >> 8) & 255; cb += c & 255;
-                                cn++;
-                            }
-                    }
-                cn = Math.max(1, cn);
-                int corR = (int) (cr / cn), corG = (int) (cg / cn), corB = (int) (cb / cn);
+                // --- the square's own background = closest-matching corner pair
+                float[] bgCorner = new float[3];
+                sampleSquareBg(px, w, h, rect.left + x0, rect.top + y0, rect.left + x1, rect.top + y1, bgCorner);
+                int corR = Math.round(bgCorner[0]), corG = Math.round(bgCorner[1]), corB = Math.round(bgCorner[2]);
                 cornerRgb[idx] = (corR << 16) | (corG << 8) | corB;
 
                 // --- middle region: the piece body
@@ -688,7 +818,7 @@ public class Vision {
                     if (cur[i]) { ero++; bodyAcc += lumI[i]; }
                 float inkF = tot > 0 ? ink / (float) tot : 0f;
                 float erodeF = tot > 0 ? ero / (float) tot : 0f;
-                inkFrac[idx] = Math.max(inkF, erodeF * 2.2f);                  // for the type guess
+                inkFrac[idx] = inkF;                                           // true ink fraction for type guess
                 f3[idx] = 0.5f * inkF + 0.5f * Math.min(1f, erodeF * 2.5f);    // occupancy feature
                 dmaxArr[idx] = dmax;
 
@@ -735,15 +865,19 @@ public class Vision {
             score[i] = 0.18f * (f1[i] / m1) + 0.14f * (f2[i] / m2) + 0.46f * (f3[i] / m3)
                     + 0.22f * Math.min(1f, dmaxArr[i] * 1.4f);
 
-        float thr = otsu(score);
+        float[] sortedScores = score.clone();
+        java.util.Arrays.sort(sortedScores);
+        // At least 32 squares on a chess board are always empty; sortedScores[26] is a guaranteed empty square
+        float emptyFloor = sortedScores[26];
+        float peakScore = sortedScores[61];
+        float gapThr = emptyFloor + Math.max(0.14f, (peakScore - emptyFloor) * 0.25f);
+        float thr = Math.min(otsu(score), gapThr);
         int occ = 0;
-        for (int i = 0; i < 64; i++) if (score[i] > thr) occ++;
+        for (int i = 0; i < 64; i++) if (score[i] > thr && dmaxArr[i] > 0.24f) occ++;
         if (occ > 32) {                       // a chess board never has more than 32 pieces
-            float[] tmp = score.clone();
-            java.util.Arrays.sort(tmp);
-            thr = tmp[64 - 32];
+            thr = (sortedScores[31] + sortedScores[32]) * 0.5f;
             occ = 0;
-            for (int i = 0; i < 64; i++) if (score[i] > thr) occ++;
+            for (int i = 0; i < 64; i++) if (score[i] > thr && dmaxArr[i] > 0.24f) occ++;
         }
 
         // ---------------- empty-square colours of both parities (for white/black decision)
@@ -770,6 +904,24 @@ public class Vision {
         }
         float lmid = (bgLum[0] + bgLum[1]) / 2f;
 
+        // Also refine lmid using the occupied pieces' own luminance range when both colours are present
+        if (occ >= 4) {
+            float minPL = 1f, maxPL = 0f;
+            float[] occLums = new float[occ];
+            int k = 0;
+            for (int i = 0; i < 64; i++) {
+                if (score[i] > thr && dmaxArr[i] > 0.24f && k < occ) {
+                    occLums[k++] = inkLum[i];
+                    if (inkLum[i] < minPL) minPL = inkLum[i];
+                    if (inkLum[i] > maxPL) maxPL = inkLum[i];
+                }
+            }
+            if (maxPL - minPL > 0.22f) {
+                float pMid = (minPL + maxPL) * 0.5f;
+                lmid = 0.45f * lmid + 0.55f * pMid;
+            }
+        }
+
         // Reject regions that do not have alternating light/dark board squares (e.g. a UI screen or stale rect)
         if (colDist(bgRgb[0], bgRgb[1]) < 0.032f || colorAltFull(px, w, h, rect) < 0.16f) {
             res.ok = false;
@@ -780,7 +932,7 @@ public class Vision {
         for (int i = 0; i < 64; i++) {
             // a piece covers a real part of the square AND contains a strongly contrasting pixel;
             // that is what separates a piece from a soft highlight or a move dot.
-            boolean occupied = score[i] > thr && dmaxArr[i] > 0.26f;
+            boolean occupied = score[i] > thr && dmaxArr[i] > 0.24f && inkFrac[i] > 0.08f;
             res.colorPat[i] = occupied ? (inkLum[i] > lmid ? 1 : 2) : 0;
             res.conf[i] = Math.abs(score[i] - thr) / Math.max(1e-4f, Math.max(thr, 0.25f));
             res.centerRgb[i] = centreRgb[i];
@@ -801,8 +953,8 @@ public class Vision {
         }
         if (occ >= 3 && (nw == 0 || nb == 0)) {
             List<Integer> ids = new ArrayList<>();
-            float[] v = new float[occ];
-            for (int i = 0; i < 64; i++) if (res.colorPat[i] != 0) { ids.add(i); }
+            for (int i = 0; i < 64; i++) if (res.colorPat[i] != 0) ids.add(i);
+            float[] v = new float[ids.size()];
             for (int k = 0; k < ids.size(); k++) v[k] = inkLum[ids.get(k)];
             float t2 = otsu(v);
             for (int i : ids) res.colorPat[i] = inkLum[i] > t2 ? 1 : 2;
@@ -821,20 +973,54 @@ public class Vision {
     public static int guessType(Result res, int idx, boolean isWhite) {
         float ink = res.inkFrac[idx];
         float[] b = res.bands[idx];
-        float top = (b[0] + b[1]) / 2f, bot = (b[6] + b[7]) / 2f, midb = (b[3] + b[4]) / 2f;
-        float type;
-        if (ink < 0.20f) type = 1;                        // pawn
-        else if (ink < 0.32f) {
-            if (top < bot * 0.72f) type = 3;              // bishop
-            else if (midb > top * 1.15f) type = 2;        // knight
-            else type = 3;
-        } else if (ink < 0.44f) {
-            if (top > bot * 0.85f) type = 4;              // rook
-            else type = 2;
-        } else {
-            type = (top > 0.25f && b[0] < 0.18f) ? 6 : 5; // king : queen
+        // Bands 1..6 cover the vertical profile of the piece from top (b[1]) to base (b[6])
+        float b1 = b[1], b2 = b[2], b3 = b[3], b4 = b[4], b5 = b[5], b6 = Math.max(0.10f, b[6]);
+        float mid34 = (b3 + b4) * 0.5f;
+
+        // Compute board-adaptive pawn ink reference (25th percentile of occupied inkFrac)
+        float pawnRef = 0.28f;
+        int occCnt = 0;
+        float[] occInks = new float[64];
+        for (int i = 0; i < 64; i++) {
+            if (res.colorPat[i] != 0) occInks[occCnt++] = res.inkFrac[i];
         }
-        return isWhite ? (int) type : (int) type + 8;
+        if (occCnt >= 6) {
+            java.util.Arrays.sort(occInks, 0, occCnt);
+            pawnRef = occInks[Math.min(occCnt - 1, occCnt / 4)];
+        }
+
+        int type;
+        // 1) PAWN: shortest piece (very little ink in top band b[1], narrow mid-body, smallest area)
+        if ((b1 < 0.21f && mid34 < 0.55f) || (b1 < b6 * 0.25f && ink <= pawnRef * 1.18f)) {
+            type = 1; // pawn
+        }
+        // 2) BISHOP: pointed mitre tip (modest b[1], narrow upper-neck b[2], wider belly b[4])
+        else if (b1 < 0.36f && b2 < 0.60f && b4 > b2 + 0.12f) {
+            type = 3; // bishop
+        }
+        // 3) ROOK: wide flat battlements at top (b[1], b[2]) with narrower cylindrical waist (b[3], b[4])
+        else if (b1 > 0.52f && b2 > mid34 + 0.06f) {
+            type = 4; // rook
+        }
+        // 4) KNIGHT: horse head widest at b[3] and narrowing down the neck (b[3] > b[4] > b[5])
+        else if (b2 > 0.70f && b3 > b4 + 0.07f && b4 > b5) {
+            type = 2; // knight
+        }
+        // 5) KING vs QUEEN: King has cross at top (moderate b[1]) + thick upper & lower body (b[2], b[5] > 0.80)
+        else if (b1 < 0.50f && b2 > 0.78f && b5 > 0.80f) {
+            type = 6; // king
+        } else if (b3 > 0.78f && b4 >= b3 - 0.06f) {
+            type = 5; // queen
+        } else if (ink < pawnRef * 1.22f) {
+            type = 1; // pawn fallback
+        } else if (b2 > mid34) {
+            type = 4; // rook fallback
+        } else if (b3 > b4) {
+            type = 2; // knight fallback
+        } else {
+            type = 3; // bishop fallback
+        }
+        return isWhite ? type : type + 8;
     }
 
     /**
@@ -848,15 +1034,25 @@ public class Vision {
         Board home = Board.starting(whiteBottom);
         boolean hasWK = false, hasBK = false;
 
-        // Pass 1: keep pieces on their original home squares if the colour matches
+        // Pass 1: keep pieces on their original home squares if the colour and rough shape match
         for (int i = 0; i < 64; i++) {
             int col = res.colorPat[i];
             if (col == 0) continue;
             int hp = home.s[i];
+            int rank = Board.rankIdxOf(i, whiteBottom);
             if (col == 1 && Board.isWhite(hp)) {
+                // On rank 1, only keep home identity if it wasn't replaced by a different piece
+                if (rank == 0 && hp != 6) {
+                    int gt = guessType(res, i, true);
+                    if (hp == 4 && gt != 4) continue;
+                }
                 out.s[i] = (byte) hp;
                 if (hp == 6) hasWK = true;
             } else if (col == 2 && Board.isBlack(hp)) {
+                if (rank == 7 && hp != 14) {
+                    int gt = guessType(res, i, false) - 8;
+                    if (hp == 12 && gt != 4) continue;
+                }
                 out.s[i] = (byte) hp;
                 if (hp == 14) hasBK = true;
             }
@@ -866,14 +1062,14 @@ public class Vision {
         if (!hasWK) {
             int g1 = Board.squareFromName("g1", whiteBottom);
             int c1 = Board.squareFromName("c1", whiteBottom);
-            if (g1 >= 0 && res.colorPat[g1] == 1) { out.s[g1] = 6; hasWK = true; }
-            else if (c1 >= 0 && res.colorPat[c1] == 1) { out.s[c1] = 6; hasWK = true; }
+            if (g1 >= 0 && res.colorPat[g1] == 1 && out.s[g1] == 0) { out.s[g1] = 6; hasWK = true; }
+            else if (c1 >= 0 && res.colorPat[c1] == 1 && out.s[c1] == 0) { out.s[c1] = 6; hasWK = true; }
         }
         if (!hasBK) {
             int g8 = Board.squareFromName("g8", whiteBottom);
             int c8 = Board.squareFromName("c8", whiteBottom);
-            if (g8 >= 0 && res.colorPat[g8] == 2) { out.s[g8] = 14; hasBK = true; }
-            else if (c8 >= 0 && res.colorPat[c8] == 2) { out.s[c8] = 14; hasBK = true; }
+            if (g8 >= 0 && res.colorPat[g8] == 2 && out.s[g8] == 0) { out.s[g8] = 14; hasBK = true; }
+            else if (c8 >= 0 && res.colorPat[c8] == 2 && out.s[c8] == 0) { out.s[c8] = 14; hasBK = true; }
         }
 
         // Pass 2: assign moved pieces while respecting standard piece-count limits
@@ -896,7 +1092,11 @@ public class Vision {
             int rank = Board.rankIdxOf(i, whiteBottom);
             int g = guessType(res, i, isW);
             int base = isW ? g : g - 8;
-            if (base == 6) base = 5; // kings handled separately
+            if (base == 6) {
+                if (isW && !hasWK) { out.s[i] = 6; hasWK = true; wCnt[6]++; wTot++; continue; }
+                if (!isW && !hasBK) { out.s[i] = 14; hasBK = true; bCnt[6]++; bTot++; continue; }
+                base = 5;
+            }
             if (base == 1 && (rank == 0 || rank == 7)) base = 3; // no pawns on 1st/8th rank
             if (cnt[base] >= maxPiece[base]) {
                 int[] fallbackOrder = (rank == 0 || rank == 7)
@@ -911,30 +1111,43 @@ public class Vision {
             out.s[i] = (byte) (isW ? base : base + 8);
         }
 
-        // Ensure exactly one white king and one black king
-        if (!hasWK) {
-            int best = -1;
-            float bestInk = -1f;
-            for (int i = 0; i < 64; i++) {
-                if (res.colorPat[i] == 1 && res.inkFrac[i] > bestInk) {
-                    bestInk = res.inkFrac[i];
-                    best = i;
-                }
-            }
-            if (best >= 0) out.s[best] = 6;
-            else out.s[Board.squareFromName("e1", whiteBottom)] = 6;
+        // Ensure exactly one white king and one black king on distinct squares
+        int wkIdx = -1, bkIdx = -1;
+        for (int i = 0; i < 64; i++) {
+            if (out.s[i] == 6) wkIdx = i;
+            else if (out.s[i] == 14) bkIdx = i;
         }
-        if (!hasBK) {
+        if (wkIdx < 0) {
             int best = -1;
             float bestInk = -1f;
             for (int i = 0; i < 64; i++) {
-                if (res.colorPat[i] == 2 && res.inkFrac[i] > bestInk) {
+                if (i != bkIdx && res.colorPat[i] == 1 && res.inkFrac[i] > bestInk) {
                     bestInk = res.inkFrac[i];
                     best = i;
                 }
             }
-            if (best >= 0) out.s[best] = 14;
-            else out.s[Board.squareFromName("e8", whiteBottom)] = 14;
+            if (best < 0) {
+                int e1 = Board.squareFromName("e1", whiteBottom);
+                best = (e1 != bkIdx) ? e1 : Board.squareFromName("g1", whiteBottom);
+            }
+            wkIdx = best;
+            out.s[wkIdx] = 6;
+        }
+        if (bkIdx < 0 || bkIdx == wkIdx) {
+            int best = -1;
+            float bestInk = -1f;
+            for (int i = 0; i < 64; i++) {
+                if (i != wkIdx && res.colorPat[i] == 2 && res.inkFrac[i] > bestInk) {
+                    bestInk = res.inkFrac[i];
+                    best = i;
+                }
+            }
+            if (best < 0) {
+                int e8 = Board.squareFromName("e8", whiteBottom);
+                best = (e8 != wkIdx) ? e8 : Board.squareFromName("g8", whiteBottom);
+            }
+            bkIdx = best;
+            out.s[bkIdx] = 14;
         }
         return out;
     }

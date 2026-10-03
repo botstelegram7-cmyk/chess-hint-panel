@@ -151,9 +151,15 @@ public class UciEngine {
     }
 
     /** @param elo -1 = full strength, otherwise UCI_Elo target (1350..2850) */
-    public String bestMove(String fen, int moveTimeMs, int elo) {
+    public synchronized String bestMove(String fen, int moveTimeMs, int elo) {
         if (!alive) return null;
         try {
+            if (thinking) {
+                send("stop");
+            }
+            hand.clear();
+            send("isready");
+            hand.poll(2500, TimeUnit.MILLISECONDS);
             best.clear();
             if (elo > 0) {
                 send("setoption name UCI_LimitStrength value true");
@@ -165,10 +171,11 @@ public class UciEngine {
             depth = 0; scoreCp = 0; mateIn = 0;
             thinking = true;
             send("go movetime " + moveTimeMs);
-            String line = best.poll(moveTimeMs + 15000L, TimeUnit.MILLISECONDS);
+            String line = best.poll(moveTimeMs + 8000L, TimeUnit.MILLISECONDS);
             thinking = false;
             return line;
         } catch (Throwable t) {
+            thinking = false;
             return null;
         }
     }

@@ -28,12 +28,12 @@ public class OverlayView extends View {
     public boolean whiteBottom = true;
 
     // settings, filled from Prefs
-    public int style = Markers.STYLE_BOTH;
+    public int style = Markers.STYLE_ARROW;
     public int palette = 0;
     public float scale = 1f;
-    public boolean showLabel = true;
-    public boolean showInfo = true;
-    public boolean showSides = true;
+    public boolean showLabel = false;
+    public boolean showInfo = false;
+    public boolean showSides = false;
     public boolean showFrame = false;
     public boolean showChip = true;
 

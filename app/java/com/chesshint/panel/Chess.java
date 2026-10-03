@@ -60,11 +60,13 @@ public class Chess {
         }
 
         public String fen() {
+            Pos clean = this.copy();
+            sanitize(clean);
             StringBuilder sb = new StringBuilder();
             for (int r = 0; r < 8; r++) {
                 int e = 0;
                 for (int f = 0; f < 8; f++) {
-                    int p = cb[r * 8 + f];
+                    int p = clean.cb[r * 8 + f];
                     if (p == 0) e++;
                     else {
                         if (e > 0) { sb.append(e); e = 0; }
@@ -74,9 +76,9 @@ public class Chess {
                 if (e > 0) sb.append(e);
                 if (r < 7) sb.append('/');
             }
-            sb.append(side == WHITE ? " w " : " b ");
-            sb.append(castling == null || castling.isEmpty() ? "-" : castling);
-            sb.append(' ').append(epSq >= 0 ? sq(epSq) : "-");
+            sb.append(clean.side == WHITE ? " w " : " b ");
+            sb.append(clean.castling == null || clean.castling.isEmpty() ? "-" : clean.castling);
+            sb.append(' ').append(clean.epSq >= 0 ? sq(clean.epSq) : "-");
             sb.append(" 0 1");
             return sb.toString();
         }
@@ -96,9 +98,173 @@ public class Chess {
             int f = Board.fileIdxOf(i, whiteBottom), r = Board.rankIdxOf(i, whiteBottom);
             p.cb[(7 - r) * 8 + f] = b.s[i];
         }
-        p.side = side;
+        p.side = (side == BLACK) ? BLACK : WHITE;
         p.castling = deriveCastling(p.cb);
+        sanitize(p);
         return p;
+    }
+
+    /**
+     * Ensures that a Pos satisfies all chess & Stockfish C++ invariants while preserving
+     * square colour occupancy whenever possible:
+     *  - No pawns on rank 1 or rank 8
+     *  - Exactly 1 White King and 1 Black King on non-adjacent squares
+     *  - The side NOT to move is never in check (prevents Stockfish native SIGSEGV on king capture)
+     *  - At most 1 checker on the side to move's king
+     */
+    public static void sanitize(Pos p) {
+        if (p == null || p.cb == null) return;
+        int[] cb = p.cb;
+        if (p.side != WHITE && p.side != BLACK) p.side = WHITE;
+
+        // 1) No pawns on rank 8 (0..7) or rank 1 (56..63)
+        for (int i = 0; i < 8; i++) {
+            if (cb[i] == 1) cb[i] = 3;
+            else if (cb[i] == 9) cb[i] = 11;
+        }
+        for (int i = 56; i < 64; i++) {
+            if (cb[i] == 1) cb[i] = 3;
+            else if (cb[i] == 9) cb[i] = 11;
+        }
+
+        // 2) Exactly one White King (6) and one Black King (14)
+        int wk = -1, bk = -1;
+        int[] prefW = {60, 62, 58, 61, 59, 63, 56};
+        for (int sq : prefW) if (cb[sq] == 6) { wk = sq; break; }
+        for (int i = 0; i < 64; i++) {
+            if (cb[i] == 6) {
+                if (wk < 0) wk = i;
+                else if (i != wk) cb[i] = 5;
+            }
+        }
+        int[] prefB = {4, 6, 2, 5, 3, 7, 0};
+        for (int sq : prefB) if (cb[sq] == 14) { bk = sq; break; }
+        for (int i = 0; i < 64; i++) {
+            if (cb[i] == 14) {
+                if (bk < 0) bk = i;
+                else if (i != bk) cb[i] = 13;
+            }
+        }
+
+        if (wk < 0) {
+            for (int sq : prefW) if (sq != bk && Board.isWhite(cb[sq])) { wk = sq; cb[sq] = 6; break; }
+            if (wk < 0) for (int i = 63; i >= 0; i--) if (i != bk && Board.isWhite(cb[i])) { wk = i; cb[i] = 6; break; }
+            if (wk < 0) {
+                int sq = (bk != 60) ? 60 : 62;
+                wk = sq; cb[sq] = 6;
+            }
+        }
+        if (bk < 0 || bk == wk) {
+            for (int sq : prefB) if (sq != wk && !kingStep(sq, wk) && Board.isBlack(cb[sq])) { bk = sq; cb[sq] = 14; break; }
+            if (bk < 0 || bk == wk) {
+                for (int i = 0; i < 64; i++) if (i != wk && !kingStep(i, wk) && Board.isBlack(cb[i])) { bk = i; cb[i] = 14; break; }
+            }
+            if (bk < 0 || bk == wk) {
+                for (int i = 0; i < 64; i++) if (i != wk && !kingStep(i, wk) && cb[i] == 0) { bk = i; cb[i] = 14; break; }
+            }
+            if (bk < 0 || bk == wk) {
+                int sq = (wk != 4 && !kingStep(4, wk)) ? 4 : 0;
+                bk = sq; cb[sq] = 14;
+            }
+        }
+
+        // 3) Kings must never be adjacent
+        if (kingStep(wk, bk)) {
+            for (int i = 0; i < 64; i++) {
+                if (i != wk && !kingStep(i, wk) && Board.isBlack(cb[i])) {
+                    cb[bk] = cb[i];
+                    cb[i] = 14;
+                    bk = i;
+                    break;
+                }
+            }
+            if (kingStep(wk, bk)) {
+                for (int i = 0; i < 64; i++) {
+                    if (i != wk && !kingStep(i, wk) && cb[i] == 0) {
+                        cb[bk] = 0;
+                        cb[i] = 14;
+                        bk = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 4) Side NOT to move must NEVER be in check
+        int oppSide = 3 - p.side;
+        int oppKing = (oppSide == WHITE) ? wk : bk;
+        if (oppKing >= 0 && attacked(cb, oppKing, p.side)) {
+            int offset = (p.side == WHITE) ? 0 : 8;
+            for (int i = 0; i < 64 && attacked(cb, oppKing, p.side); i++) {
+                int pc = cb[i];
+                if (pc == 0 || pc == 6 || pc == 14) continue;
+                if (Board.isWhite(pc) != (p.side == WHITE)) continue;
+                cb[i] = 0;
+                boolean stillAttacked = attacked(cb, oppKing, p.side);
+                cb[i] = pc;
+                if (!stillAttacked) {
+                    int[] altTypes = (i >= 8 && i < 56) ? new int[]{1, 2, 3, 4} : new int[]{2, 3, 4};
+                    for (int t : altTypes) {
+                        cb[i] = offset + t;
+                        if (!attacked(cb, oppKing, p.side)) break;
+                    }
+                } else {
+                    // One of several attackers: replace this piece with a non-attacking type
+                    int[] altTypes = (i >= 8 && i < 56) ? new int[]{1, 2, 3, 4} : new int[]{2, 3, 4};
+                    for (int t : altTypes) {
+                        int cand = offset + t;
+                        if (!pieceAttacksSquare(cb, i, cand, oppKing)) {
+                            cb[i] = cand;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5) Side to move's King should have at most 1 checker (avoids impossible triple checks)
+        int myKing = (p.side == WHITE) ? wk : bk;
+        if (myKing >= 0 && attacked(cb, myKing, oppSide)) {
+            int offset = (oppSide == WHITE) ? 0 : 8;
+            int checkers = 0;
+            for (int i = 0; i < 64; i++) {
+                int pc = cb[i];
+                if (pc == 0 || pc == 6 || pc == 14) continue;
+                if (Board.isWhite(pc) != (oppSide == WHITE)) continue;
+                if (pieceAttacksSquare(cb, i, pc, myKing)) {
+                    checkers++;
+                    if (checkers > 1) {
+                        int[] altTypes = (i >= 8 && i < 56) ? new int[]{1, 2, 3, 4} : new int[]{2, 3, 4};
+                        for (int t : altTypes) {
+                            int cand = offset + t;
+                            if (!pieceAttacksSquare(cb, i, cand, myKing)) {
+                                cb[i] = cand;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        p.castling = deriveCastling(cb);
+        if (p.epSq >= 0) {
+            int r = p.epSq / 8;
+            if ((p.side == WHITE && r != 2) || (p.side == BLACK && r != 5) || cb[p.epSq] != 0) {
+                p.epSq = -1;
+            }
+        }
+    }
+
+    private static boolean pieceAttacksSquare(int[] cb, int from, int pc, int targetSq) {
+        int save = cb[from];
+        int[] tmp = new int[64];
+        tmp[from] = pc;
+        for (int i = 0; i < 64; i++) if (i != from && cb[i] != 0) tmp[i] = (i == targetSq) ? 0 : 1;
+        tmp[from] = pc;
+        boolean res = attacked(tmp, targetSq, Board.isWhite(pc) ? WHITE : BLACK);
+        cb[from] = save;
+        return res;
     }
 
     public static Board toBoard(Pos p, boolean whiteBottom) {

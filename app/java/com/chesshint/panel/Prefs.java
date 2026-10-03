@@ -18,20 +18,20 @@ public class Prefs {
     // ------------------------------------------------------------- calibration
 
     public Rect boardRect() {
-        int x = sp.getInt("bx", Integer.MIN_VALUE);
+        int x = sp.getInt("bx_v2", Integer.MIN_VALUE);
         if (x == Integer.MIN_VALUE) return null;
-        int y = sp.getInt("by", 0), s = sp.getInt("bs", 0);
+        int y = sp.getInt("by_v2", 0), s = sp.getInt("bs_v2", 0);
         if (s < 64) return null;
         return new Rect(x, y, x + s, y + s);
     }
 
     public void setBoardRect(Rect r) {
-        sp.edit().putInt("bx", r.left).putInt("by", r.top).putInt("bs", r.width()).apply();
+        sp.edit().putInt("bx_v2", r.left).putInt("by_v2", r.top).putInt("bs_v2", r.width()).apply();
     }
 
     public boolean hasRect() { return boardRect() != null; }
 
-    public void clearBoardRect() { sp.edit().remove("bx").remove("by").remove("bs").apply(); }
+    public void clearBoardRect() { sp.edit().remove("bx_v2").remove("by_v2").remove("bs_v2").apply(); }
 
     // ------------------------------------------------------------- game
 
@@ -46,38 +46,38 @@ public class Prefs {
     public int elo() { return sp.getInt("elo", -1); }
     public void setElo(int e) { sp.edit().putInt("elo", e).apply(); }
 
-    public int movetime() { return sp.getInt("mt", 1500); }
+    public int movetime() { return sp.getInt("mt", 1000); }
     public void setMovetime(int ms) { sp.edit().putInt("mt", ms).apply(); }
 
     // ------------------------------------------------------------- appearance
 
     /** 0 both, 1 arrow only, 2 rings only, 3 filled squares */
-    public int markerStyle() { return sp.getInt("style", Markers.STYLE_BOTH); }
-    public void setMarkerStyle(int s) { sp.edit().putInt("style", s).apply(); }
+    public int markerStyle() { return sp.getInt("style_v2", Markers.STYLE_ARROW); }
+    public void setMarkerStyle(int s) { sp.edit().putInt("style_v2", s).apply(); }
 
-    public int palette() { return sp.getInt("pal", 0); }
-    public void setPalette(int p) { sp.edit().putInt("pal", p).apply(); }
+    public int palette() { return sp.getInt("pal_v2", 0); }
+    public void setPalette(int p) { sp.edit().putInt("pal_v2", p).apply(); }
 
     /** 0 = small, 1 = normal, 2 = large */
     public int markerSize() { return sp.getInt("msize", 1); }
     public void setMarkerSize(int s) { sp.edit().putInt("msize", s).apply(); }
     public float markerScale() { return markerSize() == 0 ? 0.82f : (markerSize() == 2 ? 1.22f : 1f); }
 
-    public boolean showLabel() { return sp.getBoolean("label", true); }
-    public void setShowLabel(boolean b) { sp.edit().putBoolean("label", b).apply(); }
+    public boolean showLabel() { return sp.getBoolean("label_v2", false); }
+    public void setShowLabel(boolean b) { sp.edit().putBoolean("label_v2", b).apply(); }
 
-    public boolean showInfo() { return sp.getBoolean("info", true); }
-    public void setShowInfo(boolean b) { sp.edit().putBoolean("info", b).apply(); }
+    public boolean showInfo() { return sp.getBoolean("info_v2", false); }
+    public void setShowInfo(boolean b) { sp.edit().putBoolean("info_v2", b).apply(); }
 
-    public boolean showSideLabels() { return sp.getBoolean("sides", true); }
-    public void setShowSideLabels(boolean b) { sp.edit().putBoolean("sides", b).apply(); }
+    public boolean showSideLabels() { return sp.getBoolean("sides_v2", false); }
+    public void setShowSideLabels(boolean b) { sp.edit().putBoolean("sides_v2", b).apply(); }
 
     public boolean showFrame() { return sp.getBoolean("frame", false); }
     public void setShowFrame(boolean b) { sp.edit().putBoolean("frame", b).apply(); }
 
     /** the small status chip near the bottom of the screen */
-    public boolean showChip() { return sp.getBoolean("chip", true); }
-    public void setShowChip(boolean b) { sp.edit().putBoolean("chip", b).apply(); }
+    public boolean showChip() { return sp.getBoolean("chip_v2", true); }
+    public void setShowChip(boolean b) { sp.edit().putBoolean("chip_v2", b).apply(); }
 
     public boolean vibrations() { return sp.getBoolean("vib", false); }
     public void setVibrations(boolean b) { sp.edit().putBoolean("vib", b).apply(); }

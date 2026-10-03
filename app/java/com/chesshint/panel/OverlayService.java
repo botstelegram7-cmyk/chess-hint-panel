@@ -167,6 +167,9 @@ public class OverlayService extends Service implements
     private String lastProblem = "";
     private boolean windowAdded;
     private int[] lastAutoPattern;
+    private int[] hintSquareSig;
+    private int[] prevPollSig;
+    private boolean waitingForOpponent;
     private String lastStatus;
     private Vibrator vibrator;
 
@@ -484,6 +487,7 @@ public class OverlayService extends Service implements
                     overlay.board = prefs.boardRect();
                     overlay.invalidate();
                 }
+                if (prefs.auto()) startAuto();
                 setStatus("Ready", "open your chess game, then tap ♞");
             });
         });
@@ -845,8 +849,13 @@ public class OverlayService extends Service implements
         if (panel != null) panel.refresh(prefs, configLine());
         if (bubble != null) bubble.setAuto(prefs.auto());
         if (prefs.auto()) {
+            waitingForOpponent = false;
+            hintSquareSig = null;
+            prevPollSig = null;
             startAuto();
-            setStatus("Auto on", "watching for your turn");
+            if (overlay == null || !overlay.hasHint()) {
+                requestHint(true);
+            }
         } else {
             stopAuto();
             setStatus("Auto off", null);
@@ -869,8 +878,15 @@ public class OverlayService extends Service implements
     @Override
     public void onFlip() {
         prefs.setWhiteBottom(!prefs.whiteBottom());
-        if (track != null) track.setWhiteBottom(prefs.whiteBottom());
-        if (overlay != null) overlay.applyPrefs(prefs);
+        track = null;
+        lastAutoPattern = null;
+        hintSquareSig = null;
+        prevPollSig = null;
+        waitingForOpponent = false;
+        if (overlay != null) {
+            overlay.clearHint();
+            overlay.applyPrefs(prefs);
+        }
         if (panel != null) panel.refresh(prefs, configLine());
         setStatus(prefs.whiteBottom() ? "Bottom = WHITE (you)" : "Bottom = BLACK (you)", null);
     }
@@ -882,6 +898,9 @@ public class OverlayService extends Service implements
         if (track == null) track = new Track(p, prefs.whiteBottom());
         else track.reset(p);
         lastAutoPattern = null;
+        hintSquareSig = null;
+        prevPollSig = null;
+        waitingForOpponent = !prefs.whiteBottom();
         if (overlay != null) overlay.clearHint();
         setStatus("New game", "white to move");
     }
@@ -950,9 +969,15 @@ public class OverlayService extends Service implements
         int side = Math.max(r.width(), r.height());
         Rect sq = new Rect(r.left, r.top, r.left + side, r.top + side);
         prefs.setBoardRect(sq);
+        track = null;
+        lastAutoPattern = null;
+        hintSquareSig = null;
+        prevPollSig = null;
+        waitingForOpponent = false;
         if (overlay != null) {
+            overlay.clearHint();
             overlay.board = sq;
-            overlay.showFrame = true;
+            overlay.showFrame = prefs.showFrame();
             overlay.invalidate();
         }
         hideCalibration();
@@ -992,7 +1017,12 @@ public class OverlayService extends Service implements
                     if (!quiet) toast("Open your chess app, then tap FIT BOARD");
                 } else {
                     prefs.setBoardRect(found);
-                    if (overlay != null) { overlay.board = found; overlay.invalidate(); }
+                    track = null;
+                    lastAutoPattern = null;
+                    hintSquareSig = null;
+                    prevPollSig = null;
+                    waitingForOpponent = false;
+                    if (overlay != null) { overlay.clearHint(); overlay.board = found; overlay.invalidate(); }
                     if (calib != null) { calib.rect.set(found); calib.invalidate(); }
                     setStatus("Board found", null);
                 }
@@ -1046,11 +1076,17 @@ public class OverlayService extends Service implements
     @Override
     public void onEditorApply(Board b, boolean whiteBottom) {
         prefs.setWhiteBottom(whiteBottom);
-        if (overlay != null) overlay.applyPrefs(prefs);
+        if (overlay != null) {
+            overlay.clearHint();
+            overlay.applyPrefs(prefs);
+        }
         Chess.Pos p = Chess.fromBoard(b, whiteBottom, whiteBottom ? Chess.WHITE : Chess.BLACK);
         if (track == null) track = new Track(p, whiteBottom);
         else track.reset(p);
-        lastAutoPattern = null;
+        lastAutoPattern = Chess.pattern(p, whiteBottom);
+        hintSquareSig = null;
+        prevPollSig = null;
+        waitingForOpponent = false;
         hideEditor();
         String warn = b.validate(whiteBottom);
         if (!warn.isEmpty()) toast("Heads up: " + warn);
@@ -1065,6 +1101,83 @@ public class OverlayService extends Service implements
             editor.whiteBottom = !editor.whiteBottom;
             editor.invalidate();
         }
+    }
+
+    // ==================================================================== position reconciliation & helpers
+
+    /**
+     * Reconciles a clean Vision.Result with our tracked Chess.Pos:
+     * 1. Checks if the board is within 0..3 plies of the standard starting position.
+     * 2. Otherwise attempts legal move tracking via Track.observe().
+     * 3. If any square's occupancy/color in track.pos still disagrees with res.colorPat,
+     *    reconciles by preserving known piece types on unmoved squares, transferring the
+     *    moving piece type when a single piece moved, and classifying any remaining squares
+     *    via Vision.guessBoard(), followed by Chess.sanitize().
+     */
+    private void syncTrackerWithVision(Vision.Result res, int expectedSide) {
+        boolean wb = prefs.whiteBottom();
+        int targetSide = (expectedSide == Chess.WHITE || expectedSide == Chess.BLACK)
+                ? expectedSide : (wb ? Chess.WHITE : Chess.BLACK);
+
+        // 1. Check if the board is at or within 1-2 moves of the starting position
+        Chess.Pos startPos = Chess.fromBoard(Board.starting(wb), wb, Chess.WHITE);
+        Track fresh = new Track(startPos, wb);
+        Track.Update uFresh = fresh.observe(res.colorPat, res.conf);
+        if (uFresh.ok && uFresh.moves.size() <= 3
+                && java.util.Arrays.equals(Chess.pattern(fresh.pos, wb), res.colorPat)) {
+            fresh.pos.side = targetSide;
+            Chess.sanitize(fresh.pos);
+            track = fresh;
+            return;
+        }
+
+        // 2. Try legal move tracking from existing track
+        Chess.Pos prevPos = track != null ? track.pos.copy() : null;
+        if (track != null) {
+            track.setWhiteBottom(wb);
+            Track.Update u = track.observe(res.colorPat, res.conf);
+            if (u.ok && java.util.Arrays.equals(Chess.pattern(track.pos, wb), res.colorPat)) {
+                track.pos.side = targetSide;
+                Chess.sanitize(track.pos);
+                return;
+            }
+        }
+
+        // 3. Reconcile previous known pieces with fresh Vision.guessBoard(res, wb)
+        Board guessed = Vision.guessBoard(res, wb);
+        if (prevPos != null) {
+            Board prevBoard = Chess.toBoard(prevPos, wb);
+            int wFrom = -1, wTo = -1, wFromCnt = 0, wToCnt = 0;
+            int bFrom = -1, bTo = -1, bFromCnt = 0, bToCnt = 0;
+            for (int i = 0; i < 64; i++) {
+                int oldC = Board.isWhite(prevBoard.s[i]) ? 1 : (Board.isBlack(prevBoard.s[i]) ? 2 : 0);
+                int newC = res.colorPat[i];
+                if (oldC == 1 && newC == 1) {
+                    guessed.s[i] = prevBoard.s[i];
+                } else if (oldC == 2 && newC == 2) {
+                    guessed.s[i] = prevBoard.s[i];
+                }
+                if (oldC == 1 && newC != 1) { wFrom = i; wFromCnt++; }
+                if (oldC != 1 && newC == 1) { wTo = i; wToCnt++; }
+                if (oldC == 2 && newC != 2) { bFrom = i; bFromCnt++; }
+                if (oldC != 2 && newC == 2) { bTo = i; bToCnt++; }
+            }
+            if (wFromCnt == 1 && wToCnt == 1 && wFrom >= 0 && wTo >= 0) {
+                byte moved = prevBoard.s[wFrom];
+                int rIdx = Board.rankIdxOf(wTo, wb);
+                if (moved == 1 && (rIdx == 0 || rIdx == 7)) moved = 5;
+                guessed.s[wTo] = moved;
+            }
+            if (bFromCnt == 1 && bToCnt == 1 && bFrom >= 0 && bTo >= 0) {
+                byte moved = prevBoard.s[bFrom];
+                int rIdx = Board.rankIdxOf(bTo, wb);
+                if (moved == 9 && (rIdx == 0 || rIdx == 7)) moved = 13;
+                guessed.s[bTo] = moved;
+            }
+        }
+        Chess.Pos reconciled = Chess.fromBoard(guessed, wb, targetSide);
+        if (track == null) track = new Track(reconciled, wb);
+        else track.reset(reconciled);
     }
 
     // ==================================================================== hint
@@ -1102,7 +1215,7 @@ public class OverlayService extends Service implements
             if (!destroyed && overlay != null) overlay.nudgeFrame();
         });
 
-        try { Thread.sleep(90); } catch (InterruptedException ignored) { }
+        try { Thread.sleep(95); } catch (InterruptedException ignored) { }
 
         Bitmap bmp = null;
         try {
@@ -1112,7 +1225,6 @@ public class OverlayService extends Service implements
         postSafe(() -> {
             if (overlay != null) {
                 overlay.setCaptureClean(false);
-                overlay.setStatus(auto ? "Auto: reading board…" : "Reading board…", null);
             }
         });
 
@@ -1143,7 +1255,7 @@ public class OverlayService extends Service implements
                 bmp.recycle();
                 postSafe(() -> {
                     finishBusy("No chess board on screen");
-                    toast("Open your chess game, then tap FIT BOARD once");
+                    if (!auto) toast("Open your chess game, then tap FIT BOARD once");
                 });
                 return;
             }
@@ -1155,49 +1267,19 @@ public class OverlayService extends Service implements
         }
         lastVisionResult = res;
 
-        final int userSide = prefs.whiteBottom() ? Chess.WHITE : Chess.BLACK;
+        final boolean wb = prefs.whiteBottom();
+        final int userSide = wb ? Chess.WHITE : Chess.BLACK;
 
-        if (track == null) {
-            Chess.Pos start = Chess.fromBoard(Board.starting(prefs.whiteBottom()), prefs.whiteBottom(), Chess.WHITE);
-            Track t = new Track(start, prefs.whiteBottom());
-            Track.Update u = t.observe(res.colorPat, res.conf);
-            if (u.ok && u.moves.size() <= 4) {
-                track = t;
-            } else {
-                Board guessed = Vision.guessBoard(res, prefs.whiteBottom());
-                Chess.Pos p = Chess.fromBoard(guessed, prefs.whiteBottom(), userSide);
-                track = new Track(p, prefs.whiteBottom());
-            }
-        } else {
-            Track.Update u = track.observe(res.colorPat, res.conf);
-            if (!u.ok && u.changed) {
-                Chess.Pos start = Chess.fromBoard(Board.starting(prefs.whiteBottom()), prefs.whiteBottom(), Chess.WHITE);
-                Track fresh = new Track(start, prefs.whiteBottom());
-                Track.Update uFresh = fresh.observe(res.colorPat, res.conf);
-                if (uFresh.ok && uFresh.moves.size() <= 4) {
-                    track = fresh;
-                } else {
-                    Board guessed = Vision.guessBoard(res, prefs.whiteBottom());
-                    Chess.Pos p = Chess.fromBoard(guessed, prefs.whiteBottom(), userSide);
-                    track = new Track(p, prefs.whiteBottom());
-                }
-            }
-        }
+        syncTrackerWithVision(res, userSide);
+        lastAutoPattern = res.colorPat.clone();
+        waitingForOpponent = false;
+        hintSquareSig = null;
 
-        final Track tr = track;
-        boolean myTurn = tr.pos.side == userSide;
+        final Chess.Pos usePos = track.pos.copy();
+        usePos.side = userSide;
+        Chess.sanitize(usePos);
+        String fen = usePos.fen();
 
-        if (auto && !myTurn) {
-            postSafe(() -> finishBusy("Waiting for the enemy…"));
-            return;
-        }
-
-        String fen = tr.pos.copy().fen();
-        if (!myTurn) {
-            Chess.Pos p2 = tr.pos.copy();
-            p2.side = userSide;
-            fen = p2.fen();
-        }
         if (!engine.isAlive()) {
             if (!engine.start()) {
                 final String err = UciEngine.libraryError();
@@ -1209,21 +1291,50 @@ public class OverlayService extends Service implements
         String mv = UciEngine.moveOf(bm);
         final int depth = engine.depth, cp = engine.scoreCp, mate = engine.mateIn;
 
+        // Verify that the suggested move is 100% legal on the actual screen board
+        java.util.List<Chess.Move> legalMoves = Chess.legal(usePos);
+        boolean legalOk = false;
+        if (mv != null && mv.length() >= 4) {
+            int fIdx = Board.squareFromName(mv.substring(0, 2), wb);
+            int tIdx = Board.squareFromName(mv.substring(2, 4), wb);
+            if (fIdx >= 0 && tIdx >= 0 && res.colorPat[fIdx] == userSide && res.colorPat[tIdx] != userSide) {
+                for (Chess.Move lm : legalMoves) {
+                    String uci = lm.uci();
+                    if (uci.substring(0, 4).equals(mv.substring(0, 4))) {
+                        legalOk = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!legalOk) {
+            mv = null;
+            for (Chess.Move lm : legalMoves) {
+                String uci = lm.uci();
+                int fIdx = Board.squareFromName(uci.substring(0, 2), wb);
+                int tIdx = Board.squareFromName(uci.substring(2, 4), wb);
+                if (fIdx >= 0 && tIdx >= 0 && res.colorPat[fIdx] == userSide && res.colorPat[tIdx] != userSide) {
+                    mv = uci;
+                    break;
+                }
+            }
+        }
+
         if (mv == null || mv.length() < 4) {
-            postSafe(() -> finishBusy("No move found (game over?)"));
+            postSafe(() -> finishBusy("No legal move found (game over?)"));
             return;
         }
 
-        final int fromIdx = Board.squareFromName(mv.substring(0, 2), prefs.whiteBottom());
-        final int toIdx = Board.squareFromName(mv.substring(2, 4), prefs.whiteBottom());
+        final int fromIdx = Board.squareFromName(mv.substring(0, 2), wb);
+        final int toIdx = Board.squareFromName(mv.substring(2, 4), wb);
         if (fromIdx < 0 || toIdx < 0) {
             postSafe(() -> finishBusy("Bad move from the engine"));
             return;
         }
         final String promo = mv.length() > 4 ? mv.substring(4) : "";
         int fsq = Chess.sqFromName(mv.substring(0, 2));
-        final int piece = fsq >= 0 ? tr.pos.cb[fsq] : 0;
-        final String text = Markers.label(piece, mv.substring(0, 2), mv.substring(2, 4), promo, myTurn);
+        final int piece = fsq >= 0 ? usePos.cb[fsq] : 0;
+        final String text = Markers.label(piece, mv.substring(0, 2), mv.substring(2, 4), promo, true);
 
         StringBuilder info = new StringBuilder();
         info.append("depth ").append(depth);
@@ -1237,7 +1348,7 @@ public class OverlayService extends Service implements
                 overlay.setHint(fromIdx, toIdx, text, info.toString());
             }
             buzz();
-            finishBusy(text);
+            finishBusy(null);
         });
     }
 
@@ -1253,7 +1364,7 @@ public class OverlayService extends Service implements
                 return;
             }
             if (!busy && grab != null) checkAuto();
-            main.postDelayed(this, 1100);
+            main.postDelayed(this, 650);
         }
     };
 
@@ -1261,7 +1372,7 @@ public class OverlayService extends Service implements
         if (autoRunning || destroyed) return;
         autoRunning = true;
         main.removeCallbacks(autoTick);
-        main.postDelayed(autoTick, 600);
+        main.postDelayed(autoTick, 450);
     }
 
     private void stopAuto() {
@@ -1269,39 +1380,273 @@ public class OverlayService extends Service implements
         main.removeCallbacks(autoTick);
     }
 
+    /** Computes a 64-square mean-RGB signature for fast visual move detection without hiding the overlay. */
+    private static int[] computeSquareSig(Bitmap bmp, Rect board) {
+        if (bmp == null || board == null) return null;
+        int W = bmp.getWidth(), H = bmp.getHeight();
+        int bx = Math.max(0, board.left), by = Math.max(0, board.top);
+        int bw = Math.min(W - bx, board.width()), bh = Math.min(H - by, board.height());
+        if (bw < 64 || bh < 64) return null;
+        int[] px = new int[bw * bh];
+        bmp.getPixels(px, 0, bw, bx, by, bw, bh);
+        int[] sig = new int[64];
+        float sq = bw / 8f;
+        for (int r = 0; r < 8; r++) {
+            for (int f = 0; f < 8; f++) {
+                int x0 = Math.max(0, Math.round((f + 0.22f) * sq));
+                int x1 = Math.min(bw - 1, Math.round((f + 0.78f) * sq));
+                int y0 = Math.max(0, Math.round((r + 0.22f) * sq));
+                int y1 = Math.min(bh - 1, Math.round((r + 0.78f) * sq));
+                long sr = 0, sg = 0, sb = 0;
+                int cnt = 0;
+                for (int y = y0; y <= y1; y += 2) {
+                    int row = y * bw;
+                    for (int x = x0; x <= x1; x += 2) {
+                        int c = px[row + x];
+                        sr += (c >> 16) & 255;
+                        sg += (c >> 8) & 255;
+                        sb += c & 255;
+                        cnt++;
+                    }
+                }
+                if (cnt > 0) {
+                    sig[r * 8 + f] = (((int) (sr / cnt)) << 16) | (((int) (sg / cnt)) << 8) | ((int) (sb / cnt));
+                }
+            }
+        }
+        return sig;
+    }
+
+    private static int sigDiffCount(int[] a, int[] b, int thrPerChannel) {
+        if (a == null || b == null || a.length != 64 || b.length != 64) return 64;
+        int limit = thrPerChannel * 3;
+        int diff = 0;
+        for (int i = 0; i < 64; i++) {
+            int ca = a[i], cb = b[i];
+            int d = Math.abs(((ca >> 16) & 255) - ((cb >> 16) & 255))
+                    + Math.abs(((ca >> 8) & 255) - ((cb >> 8) & 255))
+                    + Math.abs((ca & 255) - (cb & 255));
+            if (d > limit) diff++;
+        }
+        return diff;
+    }
+
+    /**
+     * Determines which side made the most recent move between two clean 64-square color patterns:
+     *   0  = no change
+     *  -1  = new game / full board reset (>8 squares changed)
+     *   userSide = the user moved last (now waiting for opponent)
+     *   oppSide  = the opponent moved last (now it is the user's turn!)
+     */
+    private int whoMovedLast(int[] prev, int[] cur, int userSide) {
+        if (prev == null || cur == null || java.util.Arrays.equals(prev, cur)) return 0;
+        int oppSide = 3 - userSide;
+        int totalDiff = 0;
+        int empU = 0, arrU = 0, empO = 0, arrO = 0;
+        for (int i = 0; i < 64; i++) {
+            if (prev[i] != cur[i]) totalDiff++;
+            if (prev[i] == userSide && cur[i] == 0) empU++;
+            if (prev[i] != userSide && cur[i] == userSide) arrU++;
+            if (prev[i] == oppSide && cur[i] == 0) empO++;
+            if (prev[i] != oppSide && cur[i] == oppSide) arrO++;
+        }
+        if (totalDiff > 8) return -1;
+
+        boolean uMoved = empU >= 1 && arrU >= 1;
+        boolean oMoved = empO >= 1 && arrO >= 1;
+
+        if (oMoved && !uMoved) return oppSide;
+        if (uMoved && !oMoved) return userSide;
+        if (uMoved && oMoved) {
+            return waitingForOpponent ? userSide : oppSide;
+        }
+        if (empU >= 1 && empO >= 1 && arrU == 0 && arrO == 0) {
+            // Capture + immediate recapture on the same square
+            return waitingForOpponent ? userSide : oppSide;
+        }
+        if (empO >= 1 || arrO >= 1) return oppSide;
+        if (empU >= 1 || arrU >= 1) return userSide;
+        return 0;
+    }
+
     private void checkAuto() {
-        if (destroyed || grab == null) return;
+        if (destroyed || grab == null || busy) return;
         busy = true;
-        if (overlay != null) overlay.setBusy(true);
+        final Runnable nudge = () -> main.post(() -> {
+            if (!destroyed && overlay != null) overlay.nudgeFrame();
+        });
         worker.post(() -> {
             Bitmap bmp = null;
-            Rect r = prefs.boardRect();
-            Vision.Result res = null;
             try {
-                bmp = grab.grabWait(1200);
-                if (bmp != null && r != null) res = Vision.read(bmp, r);
+                bmp = grab.grabFresh(900, nudge);
+                if (bmp == null) {
+                    postSafe(() -> busy = false);
+                    return;
+                }
+                Rect r = prefs.boardRect();
+                if (r == null) {
+                    Rect det = Vision.detect(bmp);
+                    bmp.recycle();
+                    bmp = null;
+                    if (det != null) {
+                        prefs.setBoardRect(det);
+                        final Rect rr = det;
+                        postSafe(() -> {
+                            if (overlay != null) {
+                                overlay.board = rr;
+                                overlay.invalidate();
+                            }
+                            busy = false;
+                            requestHint(true);
+                        });
+                    } else {
+                        postSafe(() -> busy = false);
+                    }
+                    return;
+                }
+
+                int[] curSig = computeSquareSig(bmp, r);
+                if (curSig == null) {
+                    bmp.recycle();
+                    postSafe(() -> busy = false);
+                    return;
+                }
+
+                // Wait for any piece-sliding animation to settle between two consecutive ticks
+                boolean settled = prevPollSig != null && sigDiffCount(prevPollSig, curSig, 6) == 0;
+                prevPollSig = curSig;
+                if (!settled) {
+                    bmp.recycle();
+                    postSafe(() -> busy = false);
+                    return;
+                }
+
+                boolean hintVisible = overlay != null && overlay.hasHint();
+                if (hintVisible) {
+                    if (hintSquareSig == null) {
+                        hintSquareSig = curSig;
+                        bmp.recycle();
+                        postSafe(() -> busy = false);
+                        return;
+                    }
+                    // Check if any move happened on the board since the hint arrow was drawn
+                    if (sigDiffCount(hintSquareSig, curSig, 12) < 2) {
+                        bmp.recycle();
+                        postSafe(() -> busy = false);
+                        return;
+                    }
+                    // A piece moved on the board! Clear the old hint arrow and grab a clean frame
+                    bmp.recycle();
+                    bmp = null;
+                    hintSquareSig = null;
+                    postSafe(() -> {
+                        if (overlay != null) {
+                            overlay.clearHint();
+                            overlay.setCaptureClean(true);
+                        }
+                    });
+                    try { Thread.sleep(95); } catch (InterruptedException ignored) { }
+                    bmp = grab.grabFresh(1200, nudge);
+                    postSafe(() -> {
+                        if (overlay != null) overlay.setCaptureClean(false);
+                    });
+                    if (bmp == null) {
+                        postSafe(() -> busy = false);
+                        return;
+                    }
+                    prevPollSig = computeSquareSig(bmp, r);
+                }
+
+                // Now we have a clean frame with no hint arrow on screen
+                Vision.Result res = Vision.read(bmp, r);
+                if (res == null || !res.ok) {
+                    Rect det = Vision.detect(bmp);
+                    if (det != null) {
+                        prefs.setBoardRect(det);
+                        r = det;
+                        res = Vision.read(bmp, r);
+                    }
+                }
+                bmp.recycle();
+                bmp = null;
+
+                if (res == null || !res.ok) {
+                    postSafe(() -> busy = false);
+                    return;
+                }
+                lastVisionResult = res;
+
+                int userSide = prefs.whiteBottom() ? Chess.WHITE : Chess.BLACK;
+                int oppSide = 3 - userSide;
+
+                if (lastAutoPattern == null) {
+                    postSafe(() -> {
+                        busy = false;
+                        requestHint(true);
+                    });
+                    return;
+                }
+
+                int mover = whoMovedLast(lastAutoPattern, res.colorPat, userSide);
+                if (mover == 0) {
+                    // Board unchanged
+                    if (!waitingForOpponent && (overlay == null || !overlay.hasHint())) {
+                        postSafe(() -> {
+                            busy = false;
+                            requestHint(true);
+                        });
+                    } else {
+                        postSafe(() -> busy = false);
+                    }
+                    return;
+                }
+
+                if (mover == -1) {
+                    // New game or board reset
+                    syncTrackerWithVision(res, Chess.WHITE);
+                    lastAutoPattern = res.colorPat.clone();
+                    waitingForOpponent = (userSide == Chess.BLACK);
+                    if (!waitingForOpponent) {
+                        postSafe(() -> {
+                            busy = false;
+                            requestHint(true);
+                        });
+                    } else {
+                        postSafe(() -> busy = false);
+                    }
+                    return;
+                }
+
+                if (mover == userSide) {
+                    // User just made their move; wait for opponent's reply
+                    syncTrackerWithVision(res, oppSide);
+                    lastAutoPattern = res.colorPat.clone();
+                    waitingForOpponent = true;
+                    postSafe(() -> {
+                        if (overlay != null) overlay.clearHint();
+                        busy = false;
+                    });
+                    return;
+                }
+
+                if (mover == oppSide) {
+                    // Opponent just made their move; now it is the user's turn!
+                    syncTrackerWithVision(res, userSide);
+                    lastAutoPattern = res.colorPat.clone();
+                    waitingForOpponent = false;
+                    postSafe(() -> {
+                        busy = false;
+                        requestHint(true);
+                    });
+                    return;
+                }
+
+                postSafe(() -> busy = false);
             } catch (Throwable t) {
+                if (bmp != null) bmp.recycle();
                 CrashGuard.record(this, "auto read", t);
+                postSafe(() -> busy = false);
             }
-            if (bmp != null) bmp.recycle();
-            if (res == null || !res.ok) {
-                postSafe(() -> finishBusy(lastStatus != null ? lastStatus : "Watching…"));
-                return;
-            }
-            int[] pat = res.colorPat;
-            boolean stable = lastAutoPattern != null && java.util.Arrays.equals(lastAutoPattern, pat);
-            lastAutoPattern = pat.clone();
-            if (!stable) {
-                postSafe(() -> finishBusy("Watching…"));
-                return;
-            }
-            if (track != null && java.util.Arrays.equals(Chess.pattern(track.pos, prefs.whiteBottom()), pat)) {
-                postSafe(() -> finishBusy("Watching…"));
-                return;
-            }
-            busy = false;
-            if (overlay != null) overlay.setBusy(false);
-            requestHint(true);
         });
     }
 

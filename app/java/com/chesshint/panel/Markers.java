@@ -23,17 +23,17 @@ public class Markers {
     public static final int STYLE_RINGS = 2;
     public static final int STYLE_SQUARES = 3;
 
-    /** palette[i] = {from colour, to colour} */
+    /** palette[i] = {from colour, to/arrow colour} */
     public static final int[][] PALETTE = {
-            {0xFF00E676, 0xFFFFD400},   // green / amber   (default)
-            {0xFF29B6F6, 0xFFFF4081},   // blue / pink
-            {0xFF00E5FF, 0xFFFF9100},   // cyan / orange
-            {0xFFFFFFFF, 0xFFFF1744},   // white / red
-            {0xFF76FF03, 0xFFD500F9},   // lime / violet
+            {0xFF76C424, 0xFF76C424},   // Chess.com green (default — matches user screenshot)
+            {0xFF29B6F6, 0xFF29B6F6},   // Sky blue
+            {0xFFFF9100, 0xFFFF9100},   // Orange
+            {0xFFFFD400, 0xFFFFD400},   // Gold
+            {0xFFFF4081, 0xFFFF4081},   // Pink
     };
 
     public static final String[] PALETTE_NAME = {
-            "Green / Amber", "Blue / Pink", "Cyan / Orange", "White / Red", "Lime / Violet"
+            "Green", "Blue", "Orange", "Gold", "Pink"
     };
 
     public static int from(int palette) {
@@ -135,47 +135,79 @@ public class Markers {
 
         // ------------------------------------------------------------------ arrow
         if (style == STYLE_ARROW || style == STYLE_BOTH) {
-            float dx = tx - fx, dy = ty - fy;
-            float len = (float) Math.hypot(dx, dy);
-            if (len > 1) {
-                float ux = dx / len, uy = dy / len;
-                int df = Math.abs(from % 8 - to % 8), dr = Math.abs(from / 8 - to / 8);
-                boolean knight = (df == 1 && dr == 2) || (df == 2 && dr == 1);
-                float startOff = s * (knight ? 0.16f : 0.34f);
-                float endOff = s * 0.44f;
-                float sxs = fx + ux * startOff, sys = fy + uy * startOff;
-                float exs = tx - ux * endOff, eys = ty - uy * endOff;
+            int fCol = from % 8, fRow = from / 8, tCol = to % 8, tRow = to / 8;
+            int df = Math.abs(fCol - tCol), dr = Math.abs(fRow - tRow);
+            boolean knight = (df == 1 && dr == 2) || (df == 2 && dr == 1);
 
-                float shaft = Math.max(dp * 7.5f * scale * pl, s * 0.16f);
-                stroke.setStyle(Paint.Style.STROKE);
-                stroke.setStrokeCap(Paint.Cap.ROUND);
-                stroke.setColor(0xE6000000);
-                stroke.setStrokeWidth(shaft + dp * 7.5f * scale);
-                c.drawLine(sxs, sys, exs, eys, stroke);
-                stroke.setColor(colTo);
-                stroke.setStrokeWidth(shaft);
-                c.drawLine(sxs, sys, exs, eys, stroke);
-                stroke.setColor(0x59FFFFFF);
-                stroke.setStrokeWidth(shaft * 0.30f);
-                c.drawLine(sxs, sys, exs, eys, stroke);
+            float hw = Math.max(dp * 4.5f, s * 0.135f * scale);
+            float hhw = Math.max(hw * 2.1f, s * 0.33f * scale);
+            float hl = Math.max(hhw * 1.15f, s * 0.44f * scale);
+            Path arrow = new Path();
 
-                float hl = s * 0.50f, hw = s * 0.42f * scale;
-                Path head = new Path();
-                head.moveTo(exs + ux * hl, eys + uy * hl);
-                head.lineTo(exs + uy * hw, eys - ux * hw);
-                head.lineTo(exs - uy * hw, eys + ux * hw);
-                head.close();
-                stroke.setColor(0xE6000000);
-                stroke.setStrokeWidth(dp * 7.5f * scale);
-                stroke.setStrokeJoin(Paint.Join.ROUND);
-                c.drawPath(head, stroke);
+            if (knight) {
+                float kx, ky;
+                if (dr == 2) { kx = fx; ky = ty; }
+                else { kx = tx; ky = fy; }
+                float d1x = kx - fx, d1y = ky - fy;
+                float l1 = (float) Math.hypot(d1x, d1y);
+                float d2x = tx - kx, d2y = ty - ky;
+                float l2 = (float) Math.hypot(d2x, d2y);
+                if (l1 > 1f && l2 > 1f) {
+                    float u1x = d1x / l1, u1y = d1y / l1;
+                    float u2x = d2x / l2, u2y = d2y / l2;
+                    float tipX = tx + u2x * (s * 0.12f);
+                    float tipY = ty + u2y * (s * 0.12f);
+                    float neckX = tipX - u2x * hl;
+                    float neckY = tipY - u2y * hl;
+
+                    arrow.moveTo(fx + hw * u2x, fy + hw * u2y);
+                    arrow.lineTo(kx - hw * u1x + hw * u2x, ky - hw * u1y + hw * u2y);
+                    arrow.lineTo(neckX - hw * u1x, neckY - hw * u1y);
+                    arrow.lineTo(neckX - hhw * u1x, neckY - hhw * u1y);
+                    arrow.lineTo(tipX, tipY);
+                    arrow.lineTo(neckX + hhw * u1x, neckY + hhw * u1y);
+                    arrow.lineTo(neckX + hw * u1x, neckY + hw * u1y);
+                    arrow.lineTo(kx + hw * u1x - hw * u2x, ky + hw * u1y - hw * u2y);
+                    arrow.lineTo(fx - hw * u2x, fy - hw * u2y);
+                    arrow.close();
+                }
+            } else {
+                float dx = tx - fx, dy = ty - fy;
+                float len = (float) Math.hypot(dx, dy);
+                if (len > 1f) {
+                    float ux = dx / len, uy = dy / len;
+                    float nx = -uy, ny = ux;
+                    float tipX = tx + ux * (s * 0.10f);
+                    float tipY = ty + uy * (s * 0.10f);
+                    float neckX = tipX - ux * hl;
+                    float neckY = tipY - uy * hl;
+
+                    arrow.moveTo(fx + nx * hw, fy + ny * hw);
+                    arrow.lineTo(neckX + nx * hw, neckY + ny * hw);
+                    arrow.lineTo(neckX + nx * hhw, neckY + ny * hhw);
+                    arrow.lineTo(tipX, tipY);
+                    arrow.lineTo(neckX - nx * hhw, neckY - ny * hhw);
+                    arrow.lineTo(neckX - nx * hw, neckY - ny * hw);
+                    arrow.lineTo(fx - nx * hw, fy - ny * hw);
+                    arrow.close();
+                }
+            }
+
+            if (!arrow.isEmpty()) {
                 fill.setStyle(Paint.Style.FILL);
-                fill.setColor(colTo);
-                c.drawPath(head, fill);
+                fill.setColor(withAlpha(colTo, 0xCC));
+                c.drawPath(arrow, fill);
+
+                stroke.setStyle(Paint.Style.STROKE);
+                stroke.setStrokeJoin(Paint.Join.ROUND);
+                stroke.setStrokeCap(Paint.Cap.ROUND);
+                stroke.setStrokeWidth(Math.max(1.5f, dp * 1.1f));
+                stroke.setColor(withAlpha(0xFF1A3306, 0x55));
+                c.drawPath(arrow, stroke);
             }
         }
 
-        // ------------------------------------------------------------------ badge
+        // ------------------------------------------------------------------ badge (disabled by default; never writes piece names)
         if (!showLabel || label == null || label.isEmpty()) return;
         float badgeSize = Math.max(dp * 15f, Math.min(dp * 22f, s * 0.44f * scale));
         text.setTextSize(badgeSize);
@@ -196,7 +228,6 @@ public class Markers {
         c.drawRoundRect(r, h * 0.34f, h * 0.34f, stroke);
 
         float baseline = my - (text.descent() + text.ascent()) / 2f;
-        // thin dark rim makes the text readable on any background
         textRim.setTextSize(badgeSize);
         textRim.setStyle(Paint.Style.STROKE);
         textRim.setStrokeWidth(badgeSize * 0.16f);
@@ -207,13 +238,10 @@ public class Markers {
         c.drawText(label, mx, baseline, text);
     }
 
-    /** short "which piece, where" text, e.g.  "MOVE  ♘ g1 → f3" */
+    /** Coordinate-only text (never writes piece names or piece symbols) */
     public static String label(int piece, String from, String to, String promo, boolean mine) {
         StringBuilder sb = new StringBuilder();
-        sb.append(mine ? "YOUR MOVE  " : "MOVE  ");
-        String g = Board.glyph(piece);
-        if (!g.isEmpty()) sb.append(g).append(' ');
-        sb.append(from).append(" → ").append(to);
+        sb.append(from).append(" \u2192 ").append(to);
         if (promo != null && !promo.isEmpty()) sb.append(" = ").append(promo.toUpperCase());
         return sb.toString();
     }
