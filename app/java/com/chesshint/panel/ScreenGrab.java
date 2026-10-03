@@ -11,6 +11,8 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.media.projection.MediaProjection;
 import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.view.Display;
 import android.view.WindowManager;
@@ -26,17 +28,67 @@ public class ScreenGrab {
 
     private VirtualDisplay vd;
     private ImageReader reader;
+    /** the ImageReader callback gets its OWN thread - it must never wait for the hint worker */
+    private HandlerThread grabThread;
+    private Handler grabHandler;
     private Image pending;
     private final Object lock = new Object();
     private int w, h, dpi;
     private boolean dead = false;
     private String lastError = "";
     private int frames;
+    private volatile long lastFrameAt;
+    private volatile long lastBlackAt;
 
-    public ScreenGrab(Context ctx, MediaProjection projection, Handler handler) {
+    public ScreenGrab(Context ctx, MediaProjection projection, Handler unusedWorker) {
         this.ctx = ctx.getApplicationContext();
         this.projection = projection;
-        this.handler = handler;
+        this.handler = unusedWorker;      // kept for compatibility, not used for the frames
+    }
+
+    /**
+     * Frames must be drained on a thread that is never blocked by board reading or the engine.
+     * Sharing the hint worker here was the reason screen reading looked "dead": the listener
+     * could not run while grabWait() was sleeping on that very thread.
+     */
+    private Handler frameHandler() {
+        if (grabHandler == null) {
+            grabThread = new HandlerThread("chesshint-frames");
+            grabThread.start();
+            grabHandler = new Handler(grabThread.getLooper());
+        }
+        return grabHandler;
+    }
+
+    /** ms since the last frame arrived, or -1 if none yet */
+    public long msSinceLastFrame() {
+        long t = lastFrameAt;
+        return t == 0 ? -1 : System.currentTimeMillis() - t;
+    }
+
+    /** true when the frames we get are a flat, mostly dark surface (protected content / dead display) */
+    public boolean lastFrameLookedBlank() {
+        return lastBlackAt != 0 && lastBlackAt >= lastFrameAt;
+    }
+
+    /** quick check used on the first frame: is the picture uniform? */
+    private void checkBlank(Bitmap b) {
+        try {
+            int n = 12, sum = 0, sumSq = 0, count = 0, min = 255, max = 0;
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++) {
+                    int px = Math.min(b.getWidth() - 1, (x + 1) * b.getWidth() / (n + 1));
+                    int py = Math.min(b.getHeight() - 1, (y + 1) * b.getHeight() / (n + 1));
+                    int c = b.getPixel(px, py);
+                    int lum = (((c >> 16) & 255) * 30 + ((c >> 8) & 255) * 59 + (c & 255) * 11) / 100;
+                    sum += lum; sumSq += lum * lum; count++;
+                    if (lum < min) min = lum;
+                    if (lum > max) max = lum;
+                }
+            double mean = sum / (double) count;
+            double var = sumSq / (double) count - mean * mean;
+            if (max - min < 10 && var < 12) lastBlackAt = System.currentTimeMillis();
+        } catch (Throwable ignored) { }
     }
 
     @SuppressWarnings("deprecation")
@@ -72,7 +124,7 @@ public class ScreenGrab {
                 Point p = realSize();
                 DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
                 w = p.x; h = p.y; dpi = dm.densityDpi;
-                reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
+                reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3);
                 reader.setOnImageAvailableListener(r -> {
                     try {
                         Image im = r.acquireLatestImage();
@@ -80,12 +132,13 @@ public class ScreenGrab {
                             synchronized (lock) {
                                 if (pending != null) pending.close();
                                 pending = im;
+                                lastFrameAt = System.currentTimeMillis();
                             }
                         }
                     } catch (Throwable ignored) { }
                 }, handler);
                 vd = projection.createVirtualDisplay("chesshint", w, h, dpi,
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.getSurface(), null, handler);
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.getSurface(), null, frameHandler());
                 if (vd != null) {
                     lastError = "";
                     return true;
@@ -141,6 +194,7 @@ public class ScreenGrab {
                 bmp = raw;
             }
             frames++;
+            checkBlank(bmp);
         } catch (Throwable t) {
             return null;
         } finally {
@@ -224,5 +278,8 @@ public class ScreenGrab {
             if (pending != null) { pending.close(); pending = null; }
         }
         releaseDisplay();
+        try { if (grabHandler != null) grabHandler.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
+        try { if (grabThread != null) grabThread.quitSafely(); } catch (Throwable ignored) { }
+        grabHandler = null; grabThread = null;
     }
 }

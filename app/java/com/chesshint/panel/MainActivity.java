@@ -50,6 +50,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // whenever the home screen comes up: if the panel is not running, sweep away any
+        // floating ♞ / panel / marks that survived an earlier session
+        try { OverlayService.cleanStrays(this); } catch (Throwable ignored) { }
         captureGranted = OverlayService.isRunning() && OverlayService.hasCapture();
         refresh();
     }
@@ -71,7 +74,7 @@ public class MainActivity extends Activity {
         bar.addView(icon);
         LinearLayout titles = Ui.column(this);
         titles.addView(Ui.text(this, "Chess Hint Panel", 15.5f, Ui.TEXT, true));
-        titles.addView(Ui.text(this, "v1.1  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
+        titles.addView(Ui.text(this, "v1.4  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
         bar.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView gear = Ui.text(this, "\u2699", 22f, Ui.TEXT, false);
         gear.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 4), 0);
@@ -181,12 +184,23 @@ public class MainActivity extends Activity {
         }), weight());
         diag.addView(dr, Ui.lpTop(this, 0, 6));
         LinearLayout dr2 = Ui.row(this);
+        dr2.addView(Ui.ghostButton(this, "Close floating icon", v -> {
+            OverlayService.purgeAllWindows();
+            toast("Floating icons removed");
+            new android.os.Handler().postDelayed(this::refresh, 300);
+        }), weight());
         dr2.addView(Ui.ghostButton(this, "Retry screen reading", v -> onAction()), weight());
-        dr2.addView(Ui.ghostButton(this, "Clear log", v -> {
+        diag.addView(dr2, Ui.lpTop(this, 0, 8));
+        LinearLayout dr3 = Ui.row(this);
+        dr3.addView(Ui.ghostButton(this, "Clear log", v -> {
             CrashGuard.clear(this);
             refresh();
         }), weight());
-        diag.addView(dr2, Ui.lpTop(this, 0, 8));
+        dr3.addView(Ui.ghostButton(this, "Hide ♞ button", v -> {
+            OverlayService.hideBubbleOnly();
+            toast("Floating ♞ hidden");
+        }), weight());
+        diag.addView(dr3, Ui.lpTop(this, 0, 8));
         root.addView(diag, Ui.lpTop(this, 0, 12));
 
         // ---- how to (short)
@@ -229,9 +243,9 @@ public class MainActivity extends Activity {
 
     private void onAction() {
         if (OverlayService.isRunning()) {
-            stopService(new Intent(this, OverlayService.class));
+            OverlayService.stopEverything(this);
             new android.os.Handler().postDelayed(this::refresh, 350);
-            toast("Panel stopped");
+            toast("Panel stopped — floating ♞ removed");
             return;
         }
         if (!Settings.canDrawOverlays(this)) {
@@ -298,8 +312,12 @@ public class MainActivity extends Activity {
 
         statusDot.setTextColor(running ? Ui.ACCENT : Ui.DANGER);
         statusText.setText(running ? "Panel is running" : "Panel is stopped");
+        int frames = OverlayService.framesSeen();
         statusSub.setText(running
-                ? (OverlayService.hasCapture() ? "tap the ♞ bubble in your chess app" : "waiting for screen reading…")
+                ? (OverlayService.hasCapture()
+                    ? (frames > 0 ? ("screen reading OK (" + frames + " pictures) — tap the ♞ bubble")
+                                  : "waiting for the first picture…")
+                    : "waiting for screen reading…")
                 : "allow both permissions, then press START PANEL");
         actionBtn.setText(running ? "STOP PANEL" : "START PANEL");
         actionBtn.setBackground(Ui.round(running ? 0xFF2A1620 : Ui.ACCENT, 0, this, 14));
@@ -338,7 +356,7 @@ public class MainActivity extends Activity {
     private void shareLog() {
         try {
             StringBuilder sb = new StringBuilder();
-            sb.append("Chess Hint Panel ").append("1.3").append("\n");
+            sb.append("Chess Hint Panel ").append("1.4").append("\n");
             sb.append("android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (api ").append(android.os.Build.VERSION.SDK_INT).append(")\n");
             sb.append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL).append("\n\n");

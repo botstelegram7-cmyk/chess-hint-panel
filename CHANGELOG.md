@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.4 — current
+**Screen reading fixed + the floating ♞ can no longer pile up**
+
+### Why screen reading said "could not read the screen"
+The frame listener of the capture was attached to the *same* worker thread that reads the board.
+`grabWait()` parks that thread while it waits for a picture, so the listener could never run and
+no frame was ever delivered — the panel waited forever and then reported "Could not read the
+screen". v1.4 gives the capture its own `chesshint-frames` thread, so pictures arrive while the
+board reader and the engine are busy.
+
+* first picture: waits up to 8 s, then keeps watching in the background instead of failing
+* a second "start recording" grant now replaces the old capture (two live projections can
+  deliver black frames on some phones)
+* blank/black frames are detected and explained (some chess apps block capture — protected content)
+* if the capture object dies but the token is still valid, **SHOW MY MOVE** rebuilds it instead of
+  refusing
+* Diagnostics now shows frames received, seconds since the last picture, blank-frame state and
+  how many floating windows exist
+
+### Why several floating icons appeared and STOP looked broken
+`ensureWindows()` was posted with a 150 ms delay. When the service was destroyed first, that
+queued call still ran and re-added the ♞ bubble — a window with **no service behind it**, so the
+app believed it was stopped and the STOP button had nothing to stop. Every failed start left
+another orphan on screen.
+
+* a delayed/post-destroy `ensureWindows()` is now ignored (`destroyed` flag) and `onDestroy()`
+  cancels all pending callbacks
+* every window is tracked in a static registry; `purgeAllWindows()` removes any of them, whoever
+  created it
+* opening the app sweeps strays away automatically when the panel is not running
+* the ♞ button now carries a red **✕** — one tap closes everything
+* the panel gained **HIDE ♞** (marks stay) and **✖ STOP & CLOSE**
+* the home screen gained **Close floating icon** and **Hide ♞ button**
+* STOP from the app, the notification and the ♞ all go through the same shutdown path
+
 ## v1.3 — current
 **Screen-recording crash fixed (Android 10–15) + the panel never closes itself**
 * The foreground service / MediaProjection order is now **correct for every Android version**:

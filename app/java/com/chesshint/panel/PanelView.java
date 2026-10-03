@@ -20,6 +20,7 @@ public class PanelView extends LinearLayout {
         void onFlip();
         void onNewGame();
         void onHide();
+        void onHideBubble();
         void onStop();
     }
 
@@ -62,8 +63,12 @@ public class PanelView extends LinearLayout {
 
         LinearLayout r4 = Ui.row(c);
         r4.addView(tile("HIDE MARKS", 0, v -> l.onHide()), tileLp());
-        r4.addView(tile("STOP", Ui.DANGER, v -> l.onStop()), tileLp());
+        r4.addView(tile("HIDE \u265E", 0, v -> l.onHideBubble()), tileLp());
         addView(r4, top());
+
+        LinearLayout r5 = Ui.row(c);
+        r5.addView(tile("\u2716  STOP & CLOSE", Ui.DANGER, v -> l.onStop()), tileLp());
+        addView(r5, top());
     }
 
     private LinearLayout.LayoutParams full() {

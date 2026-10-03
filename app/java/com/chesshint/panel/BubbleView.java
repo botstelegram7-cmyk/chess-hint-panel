@@ -16,6 +16,7 @@ public class BubbleView extends View {
         void onBubbleLongPress();
         void onBubbleMove(float dx, float dy);
         void onBubbleDrop();
+        void onBubbleClose();
     }
 
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -27,6 +28,8 @@ public class BubbleView extends View {
     private float lastX, lastY, downX, downY;
     private boolean moved, longFired;
     private boolean auto;
+    /** the little ✕ in the corner: one tap and the whole panel is gone */
+    private boolean closeButton;
     private final Runnable longPress = () -> {
         longFired = true;
         listener.onBubbleLongPress();
@@ -44,6 +47,13 @@ public class BubbleView extends View {
     private float scaleFactor = 1f;
 
     public void setAuto(boolean a) { auto = a; invalidate(); }
+
+    public void setCloseButton(boolean b) { closeButton = b; invalidate(); }
+
+    /** the ✕ hotspot, in view coordinates */
+    private float closeCx() { return getWidth() - dp * 5.5f; }
+    private float closeCy() { return dp * 5.5f; }
+    private float closeR() { return dp * 9.5f; }
 
     public void setScaleFactor(float f) {
         scaleFactor = Math.max(0.7f, Math.min(1.4f, f));
@@ -82,12 +92,34 @@ public class BubbleView extends View {
         t.setTextSize(dp * 9f);
         t.setColor(auto ? 0xFF00E676 : 0xFFFFD400);
         c.drawText("HINT", r, h - dp * 6f, t);
+
+        if (closeButton) {
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(0xF2FF5C6C);
+            c.drawCircle(closeCx(), closeCy(), dp * 7.5f, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(dp * 1.6f);
+            p.setColor(0xFFFFFFFF);
+            c.drawCircle(closeCx(), closeCy(), dp * 7.5f, p);
+            p.setStrokeWidth(dp * 2.2f);
+            float a = dp * 3.1f;
+            c.drawLine(closeCx() - a, closeCy() - a, closeCx() + a, closeCy() + a, p);
+            c.drawLine(closeCx() + a, closeCy() - a, closeCx() - a, closeCy() + a, p);
+        }
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                if (closeButton) {
+                    float dx = e.getX() - closeCx(), dy = e.getY() - closeCy();
+                    if (dx * dx + dy * dy <= closeR() * closeR()) {   // generous hit area
+                        removeCallbacks(longPress);
+                        listener.onBubbleClose();
+                        return true;
+                    }
+                }
                 lastX = e.getRawX();
                 lastY = e.getRawY();
                 downX = lastX; downY = lastY;
