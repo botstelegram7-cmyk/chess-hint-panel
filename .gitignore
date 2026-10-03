@@ -1,0 +1,21 @@
+# build output
+build/
+out/
+*.class
+*.dex
+*.apk
+!apk/*.apk
+!docs/screenshots/*.png
+
+# editor / os
+.idea/
+*.iml
+.vscode/
+.DS_Store
+*.log
+
+# local toolchains
+cmdline-tools/
+ndk/
+jdk/
+.cache/

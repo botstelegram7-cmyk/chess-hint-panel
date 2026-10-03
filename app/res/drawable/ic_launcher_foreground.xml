@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- mini 4x4 chess board (light squares) -->
+    <path
+        android:fillColor="#E8EFF6"
+        android:pathData="M30,30 h12 v12 h-12 z M54,30 h12 v12 h-12 z M42,42 h12 v12 h-12 z M66,42 h12 v12 h-12 z M30,54 h12 v12 h-12 z M54,54 h12 v12 h-12 z M42,66 h12 v12 h-12 z M66,66 h12 v12 h-12 z" />
+    <!-- mini board (dark squares) -->
+    <path
+        android:fillColor="#3C5F86"
+        android:pathData="M42,30 h12 v12 h-12 z M66,30 h12 v12 h-12 z M30,42 h12 v12 h-12 z M54,42 h12 v12 h-12 z M66,54 h12 v12 h-12 z M42,54 h12 v12 h-12 z M30,66 h12 v12 h-12 z M54,66 h12 v12 h-12 z" />
+    <!-- black outline of arrow -->
+    <path
+        android:pathData="M34,84 L70,48"
+        android:strokeColor="#0B2033"
+        android:strokeWidth="15"
+        android:strokeLineCap="round" />
+    <!-- arrow shaft -->
+    <path
+        android:pathData="M34,84 L70,48"
+        android:strokeColor="#FFD400"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+    <!-- arrow head outline -->
+    <path
+        android:fillColor="#0B2033"
+        android:pathData="M80,34 L79,56 L57,37 z" />
+    <!-- arrow head -->
+    <path
+        android:fillColor="#FFD400"
+        android:pathData="M78,38 L77,53 L59,40 z" />
+</vector>
