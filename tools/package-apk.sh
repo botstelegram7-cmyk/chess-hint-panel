@@ -4,7 +4,7 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
 BT="${ANDROID_BUILD_TOOLS:-$SDK/build-tools/34.0.0}"
-JDK_HOME="${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$(command -v keytool)")")")}"
+JDK_HOME="${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")}"
 KEYTOOL="$JDK_HOME/bin/keytool"; [ -x "$KEYTOOL" ] || KEYTOOL=keytool
 # make sure apksigner/keytool run on the same JDK (avoids "Algorithm HmacPBESHA256 not available")
 export PATH="$JDK_HOME/bin:$PATH"
@@ -12,7 +12,7 @@ KS="${KEYSTORE:-$ROOT/build/keystore.jks}"
 PASS="${KEYSTORE_PASS:-chesshint}"
 OUT="$ROOT/build/out"
 LIBS="$ROOT/build/jnilibs"
-VER="${VERSION_NAME:-1.5}"
+VER="${VERSION_NAME:-1.6}"
 STAGE="$OUT/stage"
 [ -f "$OUT/dex/classes.dex" ] || { echo "run tools/build-apk.sh first"; exit 1; }
 [ -f "$LIBS/libstockfish.so.arm64-v8a" ] || { echo "run tools/build-stockfish-android.sh first"; exit 1; }

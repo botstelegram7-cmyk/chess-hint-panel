@@ -1,6 +1,26 @@
 # Changelog
 
-## v1.5 — current
+## v1.6 — current
+**Complete fix for "Could not read the screen", duplicate floating icons & instant STOP**
+
+* **`ImageReader` listener now truly runs on `chesshint-frames`**: fixed the bug where
+  `reader.setOnImageAvailableListener` still passed `handler` (the blocked `hint-worker` thread)
+  instead of `frameHandler()`.
+* **Row-stride safe buffer decoding**: on 1080p/720p phones where `rowStride > width * 4` (e.g.
+  1080 width → 1088 stride), the final row of the gralloc buffer lacks trailing padding, which
+  caused `copyPixelsFromBuffer` to throw `Buffer not large enough for pixels` on every frame.
+  `ScreenGrab` now copies row-by-row when `rowStride > width * 4`.
+* **Static-screen frame caching & SurfaceFlinger nudge**: `ScreenGrab` caches `lastBitmap` so a
+  still chess board never returns `null` when SurfaceFlinger stops emitting new buffers, and
+  `OverlayView` nudges a 1×1 alpha=1 pixel while temporarily hiding existing hint marks during
+  capture (`setCaptureClean(true)`) so previous arrows/badges never pollute board reading.
+* **No more zombie floating icons after STOP / RETRY**: `MediaProjection.Callback` is now
+  unregistered before `projection.stop()` is called, preventing `onStop() → captureProblem() →
+  ensureWindows()` from respawning an uncloseable floating ♞ bubble after `onDestroy()` or retry.
+* **Automatic mid-game & new-game board recovery (`Vision.guessBoard`)**: joining a game mid-way
+  or starting a new game without tapping **NEW GAME** automatically recovers and gives a hint.
+
+## v1.5
 **Extra safety nets around the two problems reported in 1.4's report**
 
 * **Frames no longer depend on a listener callback at all**: `grab()` also calls

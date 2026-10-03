@@ -166,7 +166,7 @@ public class SettingsActivity extends Activity {
         // -------------------------------------------------- ABOUT
         LinearLayout about = Ui.card(this);
         about.addView(Ui.sectionTitle(this, "ABOUT"));
-        about.addView(Ui.text(this, "Chess Hint Panel 1.1", 13.5f, Ui.TEXT, true));
+        about.addView(Ui.text(this, "Chess Hint Panel 1.6", 13.5f, Ui.TEXT, true));
         about.addView(Ui.text(this, "Stockfish 11 compiled for this phone (ARM64 / ARMv7 / x86_64).\n"
                 + "Runs fully offline - the board is read from the screen, the move comes from your own device.\n\n"
                 + "Strength: MAX is the strongest setting that exists in chess - about 3400+ Elo. "

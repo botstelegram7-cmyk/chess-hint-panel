@@ -9,8 +9,8 @@ AJAR="${ANDROID_JAR:-$SDK/platforms/android-34/android.jar}"
 JDK_HOME="${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")}"
 OUT="$ROOT/build/out"
 APP="$ROOT/app"
-VER_CODE="${VERSION_CODE:-6}"
-VER_NAME="${VERSION_NAME:-1.5}"
+VER_CODE="${VERSION_CODE:-7}"
+VER_NAME="${VERSION_NAME:-1.6}"
 JAVAC="$JDK_HOME/bin/javac"; [ -x "$JAVAC" ] || JAVAC=javac
 KEYTOOL="$JDK_HOME/bin/keytool"; [ -x "$KEYTOOL" ] || KEYTOOL=keytool
 rm -rf "$OUT/gen" "$OUT/classes" "$OUT/dex"

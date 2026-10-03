@@ -807,7 +807,7 @@ public class Vision {
     }
 
     // =====================================================================
-    //  3) rough piece type guess (only used to seed the editor)
+    //  3) rough piece type guess (used to seed the editor / mid-game start)
     // =====================================================================
 
     public static int guessType(Result res, int idx, boolean isWhite) {
@@ -827,6 +827,86 @@ public class Vision {
             type = (top > 0.25f && b[0] < 0.18f) ? 6 : 5; // king : queen
         }
         return isWhite ? (int) type : (int) type + 8;
+    }
+
+    /**
+     * Builds a valid Board from a screen Result when joining a game mid-way.
+     * Pieces still on their starting squares keep their starting identity; moved pieces are
+     * inferred from shape features while guaranteeing exactly one white king and one black king.
+     */
+    public static Board guessBoard(Result res, boolean whiteBottom) {
+        Board out = new Board();
+        if (res == null || !res.ok) return Board.starting(whiteBottom);
+        Board home = Board.starting(whiteBottom);
+        boolean hasWK = false, hasBK = false;
+
+        // Pass 1: keep pieces on their original home squares if the colour matches
+        for (int i = 0; i < 64; i++) {
+            int col = res.colorPat[i];
+            if (col == 0) continue;
+            int hp = home.s[i];
+            if (col == 1 && Board.isWhite(hp)) {
+                out.s[i] = (byte) hp;
+                if (hp == 6) hasWK = true;
+            } else if (col == 2 && Board.isBlack(hp)) {
+                out.s[i] = (byte) hp;
+                if (hp == 14) hasBK = true;
+            }
+        }
+
+        // Check common castled king squares (g1/c1 for white, g8/c8 for black)
+        if (!hasWK) {
+            int g1 = Board.squareFromName("g1", whiteBottom);
+            int c1 = Board.squareFromName("c1", whiteBottom);
+            if (g1 >= 0 && res.colorPat[g1] == 1) { out.s[g1] = 6; hasWK = true; }
+            else if (c1 >= 0 && res.colorPat[c1] == 1) { out.s[c1] = 6; hasWK = true; }
+        }
+        if (!hasBK) {
+            int g8 = Board.squareFromName("g8", whiteBottom);
+            int c8 = Board.squareFromName("c8", whiteBottom);
+            if (g8 >= 0 && res.colorPat[g8] == 2) { out.s[g8] = 14; hasBK = true; }
+            else if (c8 >= 0 && res.colorPat[c8] == 2) { out.s[c8] = 14; hasBK = true; }
+        }
+
+        // Pass 2: assign moved pieces
+        for (int i = 0; i < 64; i++) {
+            int col = res.colorPat[i];
+            if (col == 0 || out.s[i] != 0) continue;
+            boolean isW = (col == 1);
+            int rank = Board.rankIdxOf(i, whiteBottom);
+            int g = guessType(res, i, isW);
+            int base = isW ? g : g - 8;
+            if (base == 6) base = 5; // kings handled separately
+            if (base == 1 && (rank == 0 || rank == 7)) base = 3; // no pawns on 1st/8th rank
+            out.s[i] = (byte) (isW ? base : base + 8);
+        }
+
+        // Ensure exactly one white king and one black king
+        if (!hasWK) {
+            int best = -1;
+            float bestInk = -1f;
+            for (int i = 0; i < 64; i++) {
+                if (res.colorPat[i] == 1 && res.inkFrac[i] > bestInk) {
+                    bestInk = res.inkFrac[i];
+                    best = i;
+                }
+            }
+            if (best >= 0) out.s[best] = 6;
+            else out.s[Board.squareFromName("e1", whiteBottom)] = 6;
+        }
+        if (!hasBK) {
+            int best = -1;
+            float bestInk = -1f;
+            for (int i = 0; i < 64; i++) {
+                if (res.colorPat[i] == 2 && res.inkFrac[i] > bestInk) {
+                    bestInk = res.inkFrac[i];
+                    best = i;
+                }
+            }
+            if (best >= 0) out.s[best] = 14;
+            else out.s[Board.squareFromName("e8", whiteBottom)] = 14;
+        }
+        return out;
     }
 
     /** Otsu threshold over a small array */

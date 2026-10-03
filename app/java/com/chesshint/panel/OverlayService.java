@@ -29,15 +29,21 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.Toast;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 /**
  * Everything happens here: floating windows, screen reading, game tracking and the engine.
  *
- * Android 14+ note: the media-projection foreground service has to be running BEFORE
- * MediaProjectionManager.getMediaProjection() is called, otherwise the system throws a
- * SecurityException.  That ordering is what used to crash the app when the screen
- * recording permission was accepted.
+ * Key lifecycle & capture guarantees (v1.6):
+ *  - Every floating View added to WindowManager is registered in LIVE_VIEWS so orphan/duplicate
+ *    bubbles can never accumulate across restarts or retries.
+ *  - MediaProjection.Callback is unregistered BEFORE projection.stop() and guarded by `destroyed`,
+ *    preventing onDestroy()/retry from respawning a zombie floating icon after STOP.
+ *  - ScreenGrab uses its own frameHandler() thread for ImageReader and OverlayView nudges a 1x1
+ *    pixel while hiding existing marks during capture so static boards and previous arrows never
+ *    break board reading.
  */
 public class OverlayService extends Service implements
         BubbleView.Listener, PanelView.Listener, CalibrationView.Listener, BoardEditorView.Listener {
@@ -48,19 +54,12 @@ public class OverlayService extends Service implements
     private static final String CHANNEL = "chesshint";
     private static final int NOTIF_ID = 42;
 
-    private static OverlayService INSTANCE;
+    private static volatile OverlayService INSTANCE;
 
-    /**
-     * Every window this app has added, in a static list, so that a stuck floating button can be
-     * removed even if the service that created it is already gone. Without this, a late
-     * ensureWindows() call after onDestroy() could leave a ♞ bubble nobody owns - which is
-     * exactly what made icons pile up and made STOP look broken.
-     */
-    private static final java.util.ArrayList<View> LIVE_VIEWS = new java.util.ArrayList<>();
+    private static final ArrayList<View> LIVE_VIEWS = new ArrayList<>();
     private static WindowManager LIVE_WM;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
-    /** true once onDestroy() ran: no window may be added after that */
     private volatile boolean destroyed;
 
     private WindowManager wm;
@@ -69,39 +68,67 @@ public class OverlayService extends Service implements
 
     private static void registerWindow(View v) {
         if (v == null) return;
-        synchronized (LIVE_VIEWS) { LIVE_VIEWS.add(v); }
+        synchronized (LIVE_VIEWS) {
+            if (!LIVE_VIEWS.contains(v)) LIVE_VIEWS.add(v);
+        }
     }
 
     private static void unregisterWindow(View v) {
         if (v == null) return;
-        synchronized (LIVE_VIEWS) { LIVE_VIEWS.remove(v); }
-    }
-
-    public static int windowCount() { synchronized (LIVE_VIEWS) { return LIVE_VIEWS.size(); } }
-
-    /** removes every window this app put on the screen, whoever created it - safe to call anytime */
-    public static void purgeAllWindows() {
-        if (Looper.myLooper() != Looper.getMainLooper()) { MAIN.post(OverlayService::purgeAllWindows); return; }
-        java.util.List<View> copy;
-        synchronized (LIVE_VIEWS) { copy = new java.util.ArrayList<>(LIVE_VIEWS); LIVE_VIEWS.clear(); }
-        WindowManager w = LIVE_WM;
-        for (View v : copy) {
-            try { if (v.getParent() != null && w != null) w.removeViewImmediate(v); }
-            catch (Throwable ignored) { }
+        synchronized (LIVE_VIEWS) {
+            LIVE_VIEWS.remove(v);
         }
     }
 
-    /** run on the UI thread, never let an exception kill the panel */
-    private void postSafe(Runnable r) {
-        main.post(() -> CrashGuard.guard(this, r));
+    public static int windowCount() {
+        synchronized (LIVE_VIEWS) {
+            return LIVE_VIEWS.size();
+        }
     }
+
+    /** Removes every window this app put on the screen, whoever created it - safe to call anytime. */
+    public static void purgeAllWindows() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            MAIN.post(OverlayService::purgeAllWindows);
+            return;
+        }
+        List<View> copy;
+        synchronized (LIVE_VIEWS) {
+            copy = new ArrayList<>(LIVE_VIEWS);
+            LIVE_VIEWS.clear();
+        }
+        WindowManager w = LIVE_WM;
+        if (w == null && App.ctx() != null) {
+            try { w = (WindowManager) App.ctx().getSystemService(WINDOW_SERVICE); } catch (Throwable ignored) { }
+        }
+        for (View v : copy) {
+            if (v == null) continue;
+            try {
+                if (w != null) w.removeViewImmediate(v);
+            } catch (Throwable t1) {
+                try { if (w != null) w.removeView(v); } catch (Throwable ignored) { }
+            }
+        }
+    }
+
+    /** Run on the UI thread; never let an exception kill the panel and never run after stop. */
+    private void postSafe(Runnable r) {
+        if (destroyed) return;
+        main.post(() -> {
+            if (destroyed || INSTANCE != OverlayService.this) return;
+            CrashGuard.guard(OverlayService.this, r);
+        });
+    }
+
     private HandlerThread workerThread;
     private Handler worker;
 
     private MediaProjection projection;
+    private MediaProjection.Callback projCallback;
     private ScreenGrab grab;
     private UciEngine engine;
     private Track track;
+    private Vision.Result lastVisionResult;
 
     private OverlayView overlay;
     private BubbleView bubble;
@@ -121,18 +148,21 @@ public class OverlayService extends Service implements
     private Vibrator vibrator;
 
     private final SharedPreferences.OnSharedPreferenceChangeListener prefListener =
-            (sp, key) -> main.post(this::applySettingsNow);
+            (sp, key) -> postSafe(this::applySettingsNow);
 
     // ==================================================================== lifecycle
 
     @Override
     public void onCreate() {
         super.onCreate();
+        if (INSTANCE != null && INSTANCE != this) {
+            try { INSTANCE.shutdown(null); } catch (Throwable ignored) { }
+        }
         destroyed = false;
         INSTANCE = this;
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         LIVE_WM = wm;
-        purgeAllWindows();          // never two bubbles on screen
+        purgeAllWindows();
         prefs = new Prefs(this);
         vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
         workerThread = new HandlerThread("hint-worker");
@@ -142,6 +172,7 @@ public class OverlayService extends Service implements
         createChannel();
         prefs.raw().registerOnSharedPreferenceChangeListener(prefListener);
         worker.post(() -> {
+            if (destroyed) return;
             boolean ok;
             try {
                 engine.setBudget(Tune.EngineBudget.hashMb, Tune.EngineBudget.threads);
@@ -159,47 +190,68 @@ public class OverlayService extends Service implements
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         try {
-            if (destroyed) return START_NOT_STICKY;
-            if (intent != null) {
-                if (ACTION_STOP.equals(intent.getAction())) {
-                    shutdown("Stopped");
-                    return START_NOT_STICKY;
-                }
-                if (intent.hasExtra(EXTRA_DATA)) {
-                    startProjection(intent);
-                } else if (projection == null) {
-                    stopSelf();
-                    return START_NOT_STICKY;
-                }
-            } else if (projection == null) {
-                stopSelf();
+            if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+                shutdown("Panel closed");
                 return START_NOT_STICKY;
             }
-            main.postDelayed(this::ensureWindows, 150);
+            if (destroyed) {
+                destroyed = false;
+                INSTANCE = this;
+            }
+            if (intent != null && intent.hasExtra(EXTRA_DATA)) {
+                ensureWindows();
+                startProjection(intent);
+            } else if (projection == null) {
+                shutdown(null);
+                return START_NOT_STICKY;
+            } else {
+                ensureWindows();
+            }
         } catch (Throwable t) {
             toast("Panel error: " + t.getClass().getSimpleName());
-            stopSelf();
+            shutdown(null);
         }
         return START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        super.onDestroy();
         destroyed = true;
-        // kill every queued task first: a delayed ensureWindows() used to re-add the bubble
-        // AFTER this method, leaving a floating icon with no service behind it
         try { stopAuto(); } catch (Throwable ignored) { }
         try { main.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
         try { if (worker != null) worker.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
-        try { prefs.raw().unregisterOnSharedPreferenceChangeListener(prefListener); } catch (Throwable ignored) { }
+        try { if (prefs != null) prefs.raw().unregisterOnSharedPreferenceChangeListener(prefListener); } catch (Throwable ignored) { }
         try { removeAllWindows(); } catch (Throwable ignored) { }
         try { purgeAllWindows(); } catch (Throwable ignored) { }
-        try { if (grab != null) grab.release(); } catch (Throwable ignored) { }
-        try { if (projection != null) projection.stop(); } catch (Throwable ignored) { }
+        releaseCaptureOnly();
         try { if (engine != null) engine.stop(); } catch (Throwable ignored) { }
-        try { workerThread.quitSafely(); } catch (Throwable ignored) { }
-        INSTANCE = null;
+        try { if (workerThread != null) workerThread.quitSafely(); } catch (Throwable ignored) { }
+        try { stopForeground(true); } catch (Throwable ignored) { }
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(NOTIF_ID);
+        } catch (Throwable ignored) { }
+        if (INSTANCE == this) INSTANCE = null;
+        super.onDestroy();
+    }
+
+    private void releaseCaptureOnly() {
+        try {
+            if (grab != null) {
+                grab.release();
+                grab = null;
+            }
+        } catch (Throwable ignored) { }
+        try {
+            if (projection != null) {
+                if (projCallback != null) {
+                    try { projection.unregisterCallback(projCallback); } catch (Throwable ignored) { }
+                    projCallback = null;
+                }
+                projection.stop();
+                projection = null;
+            }
+        } catch (Throwable ignored) { }
     }
 
     @Override
@@ -232,44 +284,31 @@ public class OverlayService extends Service implements
     }
 
     private void updateNotification(String text) {
+        if (destroyed) return;
         try {
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             nm.notify(NOTIF_ID, buildNotification(text == null ? "Running" : text));
         } catch (Throwable ignored) { }
     }
 
-    /**
-     * Takes the screen-reading token and starts capturing.
-     *
-     * The order is different per Android version and getting it wrong is exactly what made
-     * the panel close right after the "start recording" dialog:
-     *
-     *   API 26-28 : plain foreground service, then getMediaProjection()
-     *   API 29+   : getMediaProjection() THROWS SecurityException unless a foreground service
-     *               with FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION is already running.
-     *               Android 14+ asks for the very same order.
-     *
-     * So: foreground service first, then the projection - and if the platform disagrees we
-     * simply try the other way round instead of dying.
-     */
     private void startProjection(Intent intent) {
         int code = intent.getIntExtra(EXTRA_CODE, 0);
         Intent data = intent.getParcelableExtra(EXTRA_DATA);
-        if (data == null) { captureProblem("Screen reading data was empty — please try again"); return; }
+        if (data == null) {
+            captureProblem("Screen reading data was empty — please try again");
+            return;
+        }
 
-        // a second grant must replace the old capture, not add to it (tokens are one-shot and
-        // two live projections make some phones deliver black frames)
-        try { if (grab != null) { grab.release(); grab = null; } } catch (Throwable ignored) { }
-        try { if (projection != null) { projection.stop(); projection = null; } } catch (Throwable ignored) { }
+        // Cleanly release any previous projection/grab (unregistering callback first so it doesn't fire onStop!)
+        releaseCaptureOnly();
+        lastProblem = "";
 
-        // ---- foreground service first (required from Android 10 on)
         boolean foregroundFirst = Build.VERSION.SDK_INT >= 29;
         boolean foregroundDone = false;
         if (foregroundFirst) {
             foregroundDone = goForeground("Starting screen reading…");
         }
 
-        // ---- the projection token
         String firstError = "";
         try {
             MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
@@ -280,7 +319,6 @@ public class OverlayService extends Service implements
             CrashGuard.record(this, "getMediaProjection (foreground first)", t);
         }
 
-        // ---- fall back to the other order if the platform wanted it that way
         if (projection == null) {
             if (foregroundDone) {
                 try { stopForeground(true); } catch (Throwable ignored) { }
@@ -304,56 +342,60 @@ public class OverlayService extends Service implements
             return;
         }
         if (!foregroundDone) {
-            // API 26-28, or the fallback path: start it now so the panel survives in background
-            foregroundDone = goForeground("Ready — tap the ♞ button");
+            goForeground("Ready — tap the ♞ button");
         }
 
         final MediaProjection p = projection;
+        projCallback = new MediaProjection.Callback() {
+            @Override
+            public void onStop() {
+                if (destroyed || INSTANCE != OverlayService.this || projection != p) return;
+                postSafe(() -> {
+                    if (destroyed || INSTANCE != OverlayService.this || projection != p) return;
+                    captureProblem("Screen reading was stopped by the system — press RETRY");
+                });
+            }
+        };
         try {
-            p.registerCallback(new MediaProjection.Callback() {
-                @Override public void onStop() {
-                    postSafe(() -> captureProblem("Screen reading was stopped by the system — press RETRY"));
-                }
-            }, main);
+            p.registerCallback(projCallback, main);
         } catch (Throwable ignored) { }
 
+        final Runnable nudge = () -> main.post(() -> {
+            if (!destroyed && overlay != null) overlay.nudgeFrame();
+        });
+
         worker.post(() -> {
+            if (destroyed || projection != p) return;
             try {
-                grab = new ScreenGrab(this, p, worker);
-                if (!grab.init()) {
-                    final String err = grab.lastError();
+                ScreenGrab g = new ScreenGrab(this, p, worker);
+                if (!g.init()) {
+                    final String err = g.lastError();
+                    g.release();
                     postSafe(() -> {
                         ensureWindows();
                         captureProblem("Screen capture failed" + (err.isEmpty() ? "" : " (" + err + ")"));
                     });
                     return;
                 }
-                Bitmap first = grab.grabWait(8000);
+                grab = g;
+                Bitmap first = g.grabWait(4000, nudge);
                 if (first == null) {
-                    // do not give up: the bubble stays, and we keep watching for the first frame
+                    final String err = g.lastError();
                     postSafe(() -> {
                         ensureWindows();
-                        setStatus("Waiting for the first picture…", "keep this screen open for a moment");
+                        captureProblem("No picture arriving from the screen yet"
+                                + (err.isEmpty() ? "" : " (" + err + ")")
+                                + " — press RETRY SCREEN READING");
                     });
-                    for (int i = 0; i < 12; i++) {
-                        try { Thread.sleep(1500); } catch (InterruptedException ignored) { }
-                        first = grab.grabWait(600);
-                        if (first != null) break;
-                    }
-                    if (first == null) {
-                        postSafe(() -> captureProblem("The screen is not sending pictures yet"
-                                + (grab != null && grab.lastError().isEmpty() ? "" : " (" + (grab == null ? "capture off" : grab.lastError()) + ")")
-                                + " — press RETRY SCREEN READING"));
-                        return;
-                    }
+                    return;
                 }
-                if (first != null && grab != null && grab.lastFrameLookedBlank()) {
+                if (g.lastFrameLookedBlank()) {
+                    first.recycle();
                     postSafe(() -> {
                         ensureWindows();
                         captureProblem("The picture is coming through empty/black — your chess app may block "
-                                + "screen capture (protected content). Try another chess app or a different board theme");
+                                + "screen capture (protected content). Try another chess app or board theme");
                     });
-                    first.recycle();
                     return;
                 }
                 first.recycle();
@@ -367,19 +409,20 @@ public class OverlayService extends Service implements
                 return;
             }
             postSafe(() -> {
+                lastProblem = "";
                 ensureWindows();
+                updateNotification("Ready — tap the ♞ button");
                 if (prefs.hasRect()) {
                     overlay.board = prefs.boardRect();
                     overlay.invalidate();
                     setStatus("Ready", "open your chess game, then tap ♞");
                 } else {
-                    autoDetectBoard(true);   // never opens the frame by itself
+                    autoDetectBoard(true);
                 }
             });
         });
     }
 
-    /** starts the foreground service, with the media-projection type where the platform has it */
     private boolean goForeground(String text) {
         try {
             if (Build.VERSION.SDK_INT >= 29) {
@@ -395,12 +438,8 @@ public class OverlayService extends Service implements
         }
     }
 
-    /**
-     * Keeps the panel alive when screen reading has a problem: the reason is stored, shown in
-     * the app's Diagnostics card (so it can be shared) and the bubble stays usable, instead of
-     * the app closing itself.
-     */
     private void captureProblem(String msg) {
+        if (destroyed || INSTANCE != this) return;
         lastProblem = msg;
         CrashGuard.note(this, "screen reading", msg);
         setStatus(msg, "open the app → RETRY SCREEN READING");
@@ -417,21 +456,15 @@ public class OverlayService extends Service implements
         return t.getClass().getSimpleName() + (m == null || m.isEmpty() ? "" : ": " + m);
     }
 
-    private void fail(String msg) {
-        lastStatus = msg;
-        toast(msg);
-        stopSelf();
-    }
-
     private void ensureWindows() {
-        if (destroyed) return;
+        if (destroyed || INSTANCE != this) return;
         try {
             if (overlay == null) addOverlay();
             if (bubble == null) addBubble();
             if (panel != null) panel.refresh(prefs, configLine());
         } catch (Throwable t) {
             toast("Could not show the panel: " + t.getMessage());
-            stopSelf();
+            shutdown(null);
         }
     }
 
@@ -444,6 +477,16 @@ public class OverlayService extends Service implements
     }
 
     private void addOverlay() {
+        if (overlay != null) removeWindow(overlay, true);
+        synchronized (LIVE_VIEWS) {
+            for (int i = LIVE_VIEWS.size() - 1; i >= 0; i--) {
+                View v = LIVE_VIEWS.get(i);
+                if (v instanceof OverlayView) {
+                    LIVE_VIEWS.remove(i);
+                    try { wm.removeViewImmediate(v); } catch (Throwable t) { try { wm.removeView(v); } catch (Throwable ignored) { } }
+                }
+            }
+        }
         overlay = new OverlayView(this);
         overlay.applyPrefs(prefs);
         overlay.board = prefs.boardRect();
@@ -462,9 +505,20 @@ public class OverlayService extends Service implements
     }
 
     private void addBubble() {
+        if (bubble != null) removeWindow(bubble, false);
+        synchronized (LIVE_VIEWS) {
+            for (int i = LIVE_VIEWS.size() - 1; i >= 0; i--) {
+                View v = LIVE_VIEWS.get(i);
+                if (v instanceof BubbleView) {
+                    LIVE_VIEWS.remove(i);
+                    try { wm.removeViewImmediate(v); } catch (Throwable t) { try { wm.removeView(v); } catch (Throwable ignored) { } }
+                }
+            }
+        }
         bubble = new BubbleView(this, this);
         bubble.setAuto(prefs.auto());
         bubble.setScaleFactor(prefs.bubbleScale());
+        bubble.setCloseButton(true);
         bubbleLp = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -476,7 +530,6 @@ public class OverlayService extends Service implements
         Point size = screenSize();
         bubbleLp.x = prefs.bubbleX() >= 0 ? prefs.bubbleX() : size.x - dp(78);
         bubbleLp.y = prefs.bubbleY() >= 0 ? prefs.bubbleY() : (int) (size.y * 0.34f);
-        bubble.setCloseButton(true);
         wm.addView(bubble, bubbleLp);
         registerWindow(bubble);
     }
@@ -487,43 +540,48 @@ public class OverlayService extends Service implements
         removeWindow(panel, false);
         removeWindow(calibHost, false);
         removeWindow(editorHost, false);
-        overlay = null; bubble = null; panel = null; calibHost = null; editorHost = null;
-        calib = null; editor = null; windowAdded = false;
+        overlay = null;
+        bubble = null;
+        panel = null;
+        calibHost = null;
+        editorHost = null;
+        calib = null;
+        editor = null;
+        windowAdded = false;
     }
 
-    /** removes one window for good, even if the first attempt fails */
-    private void removeWindow(View v, boolean ignoredFlag) {
+    private void removeWindow(View v, boolean checkFlag) {
         if (v == null) return;
         unregisterWindow(v);
-        try { wm.removeView(v); } catch (Throwable t) {
-            try { wm.removeViewImmediate(v); } catch (Throwable ignored) { }
+        if (checkFlag && !windowAdded) return;
+        try {
+            wm.removeViewImmediate(v);
+        } catch (Throwable t1) {
+            try { wm.removeView(v); } catch (Throwable ignored) { }
         }
     }
 
-    /** one-tap close: marks + floating ♞ + panels disappear, notifications are dropped, service ends */
+    /** One-tap close: marks + floating ♞ + panels disappear, notifications are dropped, service ends. */
     private void shutdown(String note) {
         destroyed = true;
         try { stopAuto(); } catch (Throwable ignored) { }
         try { main.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
+        try { if (worker != null) worker.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
         if (note != null) {
             try { Toast.makeText(getApplicationContext(), note, Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) { }
         }
         try { removeAllWindows(); } catch (Throwable ignored) { }
         try { purgeAllWindows(); } catch (Throwable ignored) { }
-        Handler w = worker;
-        if (w != null) w.post(() -> {
-            try { if (grab != null) { grab.release(); grab = null; } } catch (Throwable ignored) { }
-            try { if (projection != null) { projection.stop(); projection = null; } } catch (Throwable ignored) { }
-        });
+        releaseCaptureOnly();
         try { stopForeground(true); } catch (Throwable ignored) { }
         try {
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-            nm.cancel(NOTIF_ID);
+            if (nm != null) nm.cancel(NOTIF_ID);
         } catch (Throwable ignored) { }
+        if (INSTANCE == this) INSTANCE = null;
         try { stopSelf(); } catch (Throwable ignored) { }
     }
 
-    /** wrapper so a plain View can live in its own window */
     private static class AndroidView extends android.widget.FrameLayout {
         AndroidView(Context c, View child) {
             super(c);
@@ -555,7 +613,7 @@ public class OverlayService extends Service implements
     private void toast(String s) {
         final String m = s;
         main.post(() -> {
-            try { Toast.makeText(this, m, Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) { }
+            try { Toast.makeText(OverlayService.this, m, Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) { }
         });
     }
 
@@ -572,7 +630,7 @@ public class OverlayService extends Service implements
         sb.append("floating windows: ").append(windowCount()).append('\n');
         if (!lastTest.isEmpty()) sb.append("screen test: ").append(lastTest).append('\n');
         sb.append("engine: ").append(s.engine != null && s.engine.isAlive() ? "ready" : "not running")
-                .append("  (hash 16 MB)").append('\n');
+                .append("  (hash ").append(Tune.EngineBudget.hashMb).append(" MB)").append('\n');
         Rect r = s.prefs.boardRect();
         sb.append("board frame: ").append(r == null ? "not set" : r.toShortString()).append('\n');
         sb.append("position: ").append(s.track == null ? "not tracked" : s.track.pos.fen());
@@ -587,25 +645,33 @@ public class OverlayService extends Service implements
             overlay.setBusy(busy);
             overlay.setStatus(s, sub);
         }
-        if (s != null && (s.startsWith("YOUR") || s.startsWith("Ready") || s.startsWith("Waiting"))) updateNotification(s);
+        if (s != null && (s.startsWith("YOUR") || s.startsWith("Ready") || s.startsWith("Waiting"))) {
+            updateNotification(s);
+        }
     }
 
     private void finishBusy(String statusText) {
         busy = false;
-        if (overlay != null) overlay.setBusy(false);
+        if (overlay != null) {
+            overlay.setCaptureClean(false);
+            overlay.setBusy(false);
+        }
         setStatus(statusText, null);
     }
 
     private void buzz() {
         if (!prefs.vibrations() || vibrator == null) return;
         try {
-            if (Build.VERSION.SDK_INT >= 26) vibrator.vibrate(VibrationEffect.createOneShot(28, VibrationEffect.DEFAULT_AMPLITUDE));
-            else vibrator.vibrate(28);
+            if (Build.VERSION.SDK_INT >= 26) {
+                vibrator.vibrate(VibrationEffect.createOneShot(28, VibrationEffect.DEFAULT_AMPLITUDE));
+            } else {
+                vibrator.vibrate(28);
+            }
         } catch (Throwable ignored) { }
     }
 
-    /** called whenever any setting changes (from the settings screen) */
     private void applySettingsNow() {
+        if (destroyed) return;
         if (overlay != null) overlay.applyPrefs(prefs);
         if (bubble != null) {
             bubble.setAuto(prefs.auto());
@@ -623,6 +689,7 @@ public class OverlayService extends Service implements
 
     @Override
     public void onBubbleTap() {
+        if (destroyed) return;
         if (panel == null) {
             panel = new PanelView(this, this);
             panel.refresh(prefs, configLine());
@@ -633,7 +700,12 @@ public class OverlayService extends Service implements
                     PixelFormat.TRANSLUCENT);
             panelLp.gravity = Gravity.TOP | Gravity.START;
             positionPanel();
-            try { wm.addView(panel, panelLp); registerWindow(panel); } catch (Throwable t) { panel = null; }
+            try {
+                wm.addView(panel, panelLp);
+                registerWindow(panel);
+            } catch (Throwable t) {
+                panel = null;
+            }
         } else {
             hidePanel();
         }
@@ -659,7 +731,7 @@ public class OverlayService extends Service implements
 
     @Override
     public void onBubbleMove(float dx, float dy) {
-        if (bubbleLp == null) return;
+        if (bubbleLp == null || bubble == null) return;
         Point s = screenSize();
         bubbleLp.x = (int) Math.max(-dp(8), Math.min(s.x - dp(30), bubbleLp.x + dx));
         bubbleLp.y = (int) Math.max(-dp(8), Math.min(s.y - dp(30), bubbleLp.y + dy));
@@ -675,19 +747,35 @@ public class OverlayService extends Service implements
         if (bubbleLp != null) prefs.setBubble(bubbleLp.x, bubbleLp.y);
     }
 
-    // ==================================================================== panel
-
-    @Override public void onMove() { hidePanel(); requestHint(false); }
-
-    @Override public void onAuto() {
-        prefs.setAuto(!prefs.auto());
-        panel.refresh(prefs, configLine());
-        if (bubble != null) bubble.setAuto(prefs.auto());
-        if (prefs.auto()) { startAuto(); setStatus("Auto on", "watching for your turn"); }
-        else { stopAuto(); setStatus("Auto off", null); }
+    @Override
+    public void onBubbleClose() {
+        shutdown("Panel closed");
     }
 
-    @Override public void onSettings() {
+    // ==================================================================== panel
+
+    @Override
+    public void onMove() {
+        hidePanel();
+        requestHint(false);
+    }
+
+    @Override
+    public void onAuto() {
+        prefs.setAuto(!prefs.auto());
+        if (panel != null) panel.refresh(prefs, configLine());
+        if (bubble != null) bubble.setAuto(prefs.auto());
+        if (prefs.auto()) {
+            startAuto();
+            setStatus("Auto on", "watching for your turn");
+        } else {
+            stopAuto();
+            setStatus("Auto off", null);
+        }
+    }
+
+    @Override
+    public void onSettings() {
         hidePanel();
         try {
             startActivity(new Intent(this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -699,7 +787,8 @@ public class OverlayService extends Service implements
     @Override public void onFit() { hidePanel(); showCalibration(prefs.boardRect()); }
     @Override public void onFix() { hidePanel(); showEditor(); }
 
-    @Override public void onFlip() {
+    @Override
+    public void onFlip() {
         prefs.setWhiteBottom(!prefs.whiteBottom());
         if (track != null) track.setWhiteBottom(prefs.whiteBottom());
         if (overlay != null) overlay.applyPrefs(prefs);
@@ -707,7 +796,8 @@ public class OverlayService extends Service implements
         setStatus(prefs.whiteBottom() ? "Bottom = WHITE (you)" : "Bottom = BLACK (you)", null);
     }
 
-    @Override public void onNewGame() {
+    @Override
+    public void onNewGame() {
         hidePanel();
         Chess.Pos p = Chess.fromBoard(Board.starting(prefs.whiteBottom()), prefs.whiteBottom(), Chess.WHITE);
         if (track == null) track = new Track(p, prefs.whiteBottom());
@@ -717,7 +807,8 @@ public class OverlayService extends Service implements
         setStatus("New game", "white to move");
     }
 
-    @Override public void onHide() {
+    @Override
+    public void onHide() {
         hidePanel();
         if (overlay != null) {
             overlay.clearHint();
@@ -725,16 +816,18 @@ public class OverlayService extends Service implements
         }
     }
 
-    @Override public void onStop() { shutdown("Panel closed"); }
-
-    @Override public void onHideBubble() {
+    @Override
+    public void onHideBubble() {
         hidePanel();
         removeWindow(bubble, false);
         bubble = null;
         setStatus("Floating button hidden", "START PANEL in the app brings it back");
     }
 
-    @Override public void onBubbleClose() { shutdown("Panel closed"); }
+    @Override
+    public void onStop() {
+        shutdown("Panel closed");
+    }
 
     private void hidePanel() {
         removeWindow(panel, false);
@@ -744,7 +837,8 @@ public class OverlayService extends Service implements
     // ==================================================================== calibration / editor
 
     private void showCalibration(Rect start) {
-        if (calibHost != null) return;
+        if (destroyed || calibHost != null) return;
+        hidePanel();
         calib = new CalibrationView(this, this);
         if (start != null) calib.rect.set(start);
         calibHost = new AndroidView(this, calib);
@@ -755,12 +849,20 @@ public class OverlayService extends Service implements
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         lp.gravity = Gravity.TOP | Gravity.START;
-        try { wm.addView(calibHost, lp); registerWindow(calibHost); } catch (Throwable t) { calibHost = null; calib = null; toast("Could not open the frame tool"); }
+        try {
+            wm.addView(calibHost, lp);
+            registerWindow(calibHost);
+        } catch (Throwable t) {
+            calibHost = null;
+            calib = null;
+            toast("Could not open the frame tool");
+        }
     }
 
     private void hideCalibration() {
         removeWindow(calibHost, false);
-        calibHost = null; calib = null;
+        calibHost = null;
+        calib = null;
     }
 
     @Override
@@ -769,7 +871,11 @@ public class OverlayService extends Service implements
         int side = Math.max(r.width(), r.height());
         Rect sq = new Rect(r.left, r.top, r.left + side, r.top + side);
         prefs.setBoardRect(sq);
-        if (overlay != null) { overlay.board = sq; overlay.showFrame = true; overlay.invalidate(); }
+        if (overlay != null) {
+            overlay.board = sq;
+            overlay.showFrame = true;
+            overlay.invalidate();
+        }
         hideCalibration();
         setStatus("Board frame saved", null);
     }
@@ -779,13 +885,21 @@ public class OverlayService extends Service implements
     @Override public void onCalibAuto() { autoDetectBoard(false); }
 
     private void autoDetectBoard(boolean quiet) {
-        if (grab == null) { toast("Screen reading is not running"); return; }
-        setStatus("Looking for the board…", null);
+        if (grab == null) {
+            toast("Screen reading is not running");
+            return;
+        }
+        hidePanel();
+        if (overlay != null) overlay.setCaptureClean(true);
+        final Runnable nudge = () -> main.post(() -> {
+            if (!destroyed && overlay != null) overlay.nudgeFrame();
+        });
         worker.post(() -> {
             Bitmap b = null;
             Rect r = null;
             try {
-                b = grab.grabWait(2500);
+                try { Thread.sleep(90); } catch (InterruptedException ignored) { }
+                b = grab.grabFresh(2200, nudge);
                 r = b == null ? null : Vision.detect(b);
             } catch (Throwable t) {
                 CrashGuard.record(this, "board detection", t);
@@ -793,9 +907,10 @@ public class OverlayService extends Service implements
             if (b != null) b.recycle();
             final Rect found = r;
             postSafe(() -> {
+                if (overlay != null) overlay.setCaptureClean(false);
                 if (found == null) {
                     setStatus("No chess board on screen", "open your game and tap FIT BOARD");
-                    toast("Open your chess app, then tap FIT BOARD");
+                    if (!quiet) toast("Open your chess app, then tap FIT BOARD");
                 } else {
                     prefs.setBoardRect(found);
                     if (overlay != null) { overlay.board = found; overlay.invalidate(); }
@@ -807,8 +922,16 @@ public class OverlayService extends Service implements
     }
 
     private void showEditor() {
-        if (editorHost != null) return;
-        Board b = track != null ? Chess.toBoard(track.pos, prefs.whiteBottom()) : Board.starting(prefs.whiteBottom());
+        if (destroyed || editorHost != null) return;
+        hidePanel();
+        Board b;
+        if (track != null) {
+            b = Chess.toBoard(track.pos, prefs.whiteBottom());
+        } else if (lastVisionResult != null && lastVisionResult.ok) {
+            b = Vision.guessBoard(lastVisionResult, prefs.whiteBottom());
+        } else {
+            b = Board.starting(prefs.whiteBottom());
+        }
         editor = new BoardEditorView(this, this);
         Rect r = prefs.boardRect();
         if (r == null) {
@@ -825,14 +948,20 @@ public class OverlayService extends Service implements
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         lp.gravity = Gravity.TOP | Gravity.START;
-        try { wm.addView(editorHost, lp); registerWindow(editorHost); } catch (Throwable t) { editorHost = null; editor = null; toast("Could not open the editor"); }
+        try {
+            wm.addView(editorHost, lp);
+            registerWindow(editorHost);
+        } catch (Throwable t) {
+            editorHost = null;
+            editor = null;
+            toast("Could not open the editor");
+        }
     }
 
     private void hideEditor() {
-        if (editorHost != null) {
-            try { wm.removeView(editorHost); } catch (Throwable ignored) { }
-            editorHost = null; editor = null;
-        }
+        removeWindow(editorHost, false);
+        editorHost = null;
+        editor = null;
     }
 
     @Override
@@ -851,7 +980,8 @@ public class OverlayService extends Service implements
 
     @Override public void onEditorCancel() { hideEditor(); }
 
-    @Override public void onEditorFlip() {
+    @Override
+    public void onEditorFlip() {
         if (editor != null) {
             editor.whiteBottom = !editor.whiteBottom;
             editor.invalidate();
@@ -861,25 +991,18 @@ public class OverlayService extends Service implements
     // ==================================================================== hint
 
     private void requestHint(final boolean auto) {
-        if (busy) return;
-        if (grab == null || destroyed) {
-            if (projection != null && !destroyed) {
-                // capture object died but we still hold a projection: rebuild it instead of refusing
-                setStatus("Reconnecting screen reading…", null);
-                busy = true;
-                worker.post(() -> {
-                    try { grab = new ScreenGrab(this, projection, worker); grab.init(); } catch (Throwable ignored) { }
-                    postSafe(() -> { busy = false; if (grab != null) requestHint(auto); else finishBusy("Screen reading is not active — press START PANEL"); });
-                });
-            } else {
-                setStatus("Screen reading is not active", "open the app and press START PANEL");
-                toast("Screen reading is not active — open the app and press START PANEL");
-            }
+        if (busy || destroyed) return;
+        if (grab == null) {
+            setStatus("Screen reading is not active", "open the app and press RETRY");
+            toast("Screen reading is not active — open the app and press RETRY");
             return;
         }
         busy = true;
-        if (overlay != null) overlay.setBusy(true);
-        setStatus(auto ? "Auto: reading board…" : "Reading board…", null);
+        hidePanel();
+        if (overlay != null) {
+            overlay.setBusy(true);
+            overlay.setCaptureClean(true);
+        }
 
         worker.post(() -> {
             try {
@@ -896,126 +1019,148 @@ public class OverlayService extends Service implements
     }
 
     private void hintWork(final boolean auto) {
-        {
-            Bitmap bmp = null;
-            try {
-                bmp = auto ? grab.grabWait(1500) : grab.grabStable();
-            } catch (Throwable ignored) { }
-            if (bmp == null) {
-                postSafe(() -> finishBusy("Could not read the screen"));
+        final Runnable nudge = () -> main.post(() -> {
+            if (!destroyed && overlay != null) overlay.nudgeFrame();
+        });
+
+        try { Thread.sleep(90); } catch (InterruptedException ignored) { }
+
+        Bitmap bmp = null;
+        try {
+            bmp = auto ? grab.grabFresh(1500, nudge) : grab.grabStable(nudge);
+        } catch (Throwable ignored) { }
+
+        postSafe(() -> {
+            if (overlay != null) {
+                overlay.setCaptureClean(false);
+                overlay.setStatus(auto ? "Auto: reading board…" : "Reading board…", null);
+            }
+        });
+
+        if (bmp == null) {
+            postSafe(() -> finishBusy("Could not read the screen"));
+            return;
+        }
+        Rect r = prefs.boardRect();
+        if (r == null) {
+            Rect det = null;
+            try { det = Vision.detect(bmp); } catch (Throwable ignored) { }
+            if (det == null) {
+                bmp.recycle();
+                postSafe(() -> {
+                    finishBusy("No chess board on screen");
+                    toast("Open your chess game, then tap FIT BOARD once");
+                });
                 return;
             }
-            Rect r = prefs.boardRect();
-            if (r == null) {
-                Rect det = null;
-                try { det = Vision.detect(bmp); } catch (Throwable ignored) { }
-                if (det == null) {
-                    bmp.recycle();
-                    postSafe(() -> {
-                        finishBusy("No chess board on screen");
-                        toast("Open your chess game, then tap FIT BOARD once");
-                    });
-                    return;
-                }
-                prefs.setBoardRect(det);
-                r = det;
-                final Rect rr = det;
-                postSafe(() -> { if (overlay != null) { overlay.board = rr; overlay.invalidate(); } });
-            }
-
-            Vision.Result res;
-            try {
-                res = Vision.read(bmp, r);
-            } catch (Throwable t) {
-                res = new Vision.Result();
-            }
-            bmp.recycle();
-            if (!res.ok) {
-                postSafe(() -> finishBusy("Could not read the board"));
-                return;
-            }
-
-            // ---- keep the game tracker in sync
-            if (track == null) {
-                Chess.Pos start = Chess.fromBoard(Board.starting(prefs.whiteBottom()), prefs.whiteBottom(), Chess.WHITE);
-                Track t = new Track(start, prefs.whiteBottom());
-                Track.Update u = t.observe(res.colorPat, res.conf);
-                if (u.ok && u.moves.size() <= 4) {
-                    track = t;
-                } else {
-                    Chess.Pos p = Chess.fromBoard(Board.starting(prefs.whiteBottom()), prefs.whiteBottom(), Chess.WHITE);
-                    track = new Track(p, prefs.whiteBottom());
-                    postSafe(() -> {
-                        finishBusy("Set the pieces once, then everything is tracked");
-                        showEditor();
-                    });
-                    return;
-                }
-            } else {
-                Track.Update u = track.observe(res.colorPat, res.conf);
-                if (!u.ok && u.changed) {
-                    postSafe(() -> finishBusy("Board out of sync — tap FIX PIECES"));
-                    return;
-                }
-            }
-
-            final Track tr = track;
-            final int userSide = prefs.whiteBottom() ? Chess.WHITE : Chess.BLACK;
-            boolean myTurn = tr.pos.side == userSide;
-
-            if (auto && !myTurn) {
-                postSafe(() -> finishBusy("Waiting for the enemy…"));
-                return;
-            }
-
-            String fen = tr.pos.copy().fen();
-            if (!myTurn) {
-                Chess.Pos p2 = tr.pos.copy();
-                p2.side = userSide;
-                fen = p2.fen();
-            }
-            if (!engine.isAlive()) {
-                if (!engine.start()) {
-                    final String err = UciEngine.libraryError();
-                    postSafe(() -> finishBusy("Engine error: " + err));
-                    return;
-                }
-            }
-            String bm = engine.bestMove(fen, prefs.movetime(), prefs.elo());
-            String mv = UciEngine.moveOf(bm);
-            final int depth = engine.depth, cp = engine.scoreCp, mate = engine.mateIn;
-
-            if (mv == null || mv.length() < 4) {
-                postSafe(() -> finishBusy("No move found (game over?)"));
-                return;
-            }
-
-            final int fromIdx = Board.squareFromName(mv.substring(0, 2), prefs.whiteBottom());
-            final int toIdx = Board.squareFromName(mv.substring(2, 4), prefs.whiteBottom());
-            if (fromIdx < 0 || toIdx < 0) {
-                postSafe(() -> finishBusy("Bad move from the engine"));
-                return;
-            }
-            final String promo = mv.length() > 4 ? mv.substring(4) : "";
-            int fsq = Chess.sqFromName(mv.substring(0, 2));
-            final int piece = fsq >= 0 ? tr.pos.cb[fsq] : 0;
-            final String text = Markers.label(piece, mv.substring(0, 2), mv.substring(2, 4), promo, myTurn);
-
-            StringBuilder info = new StringBuilder();
-            info.append("depth ").append(depth);
-            if (mate != 0) info.append("   mate in ").append(Math.abs(mate));
-            else info.append(String.format(Locale.US, "   %+.2f", cp / 100.0));
-
+            prefs.setBoardRect(det);
+            r = det;
+            final Rect rr = det;
             postSafe(() -> {
                 if (overlay != null) {
-                    overlay.board = prefs.boardRect();
-                    overlay.applyPrefs(prefs);
-                    overlay.setHint(fromIdx, toIdx, text, info.toString());
+                    overlay.board = rr;
+                    overlay.invalidate();
                 }
-                buzz();
-                finishBusy(text);
             });
         }
+
+        Vision.Result res;
+        try {
+            res = Vision.read(bmp, r);
+        } catch (Throwable t) {
+            res = new Vision.Result();
+        }
+        bmp.recycle();
+        if (!res.ok) {
+            postSafe(() -> finishBusy("Could not read the board"));
+            return;
+        }
+        lastVisionResult = res;
+
+        final int userSide = prefs.whiteBottom() ? Chess.WHITE : Chess.BLACK;
+
+        if (track == null) {
+            Chess.Pos start = Chess.fromBoard(Board.starting(prefs.whiteBottom()), prefs.whiteBottom(), Chess.WHITE);
+            Track t = new Track(start, prefs.whiteBottom());
+            Track.Update u = t.observe(res.colorPat, res.conf);
+            if (u.ok && u.moves.size() <= 4) {
+                track = t;
+            } else {
+                Board guessed = Vision.guessBoard(res, prefs.whiteBottom());
+                Chess.Pos p = Chess.fromBoard(guessed, prefs.whiteBottom(), userSide);
+                track = new Track(p, prefs.whiteBottom());
+            }
+        } else {
+            Track.Update u = track.observe(res.colorPat, res.conf);
+            if (!u.ok && u.changed) {
+                Chess.Pos start = Chess.fromBoard(Board.starting(prefs.whiteBottom()), prefs.whiteBottom(), Chess.WHITE);
+                Track fresh = new Track(start, prefs.whiteBottom());
+                Track.Update uFresh = fresh.observe(res.colorPat, res.conf);
+                if (uFresh.ok && uFresh.moves.size() <= 4) {
+                    track = fresh;
+                } else {
+                    Board guessed = Vision.guessBoard(res, prefs.whiteBottom());
+                    Chess.Pos p = Chess.fromBoard(guessed, prefs.whiteBottom(), userSide);
+                    track = new Track(p, prefs.whiteBottom());
+                }
+            }
+        }
+
+        final Track tr = track;
+        boolean myTurn = tr.pos.side == userSide;
+
+        if (auto && !myTurn) {
+            postSafe(() -> finishBusy("Waiting for the enemy…"));
+            return;
+        }
+
+        String fen = tr.pos.copy().fen();
+        if (!myTurn) {
+            Chess.Pos p2 = tr.pos.copy();
+            p2.side = userSide;
+            fen = p2.fen();
+        }
+        if (!engine.isAlive()) {
+            if (!engine.start()) {
+                final String err = UciEngine.libraryError();
+                postSafe(() -> finishBusy("Engine error: " + err));
+                return;
+            }
+        }
+        String bm = engine.bestMove(fen, prefs.movetime(), prefs.elo());
+        String mv = UciEngine.moveOf(bm);
+        final int depth = engine.depth, cp = engine.scoreCp, mate = engine.mateIn;
+
+        if (mv == null || mv.length() < 4) {
+            postSafe(() -> finishBusy("No move found (game over?)"));
+            return;
+        }
+
+        final int fromIdx = Board.squareFromName(mv.substring(0, 2), prefs.whiteBottom());
+        final int toIdx = Board.squareFromName(mv.substring(2, 4), prefs.whiteBottom());
+        if (fromIdx < 0 || toIdx < 0) {
+            postSafe(() -> finishBusy("Bad move from the engine"));
+            return;
+        }
+        final String promo = mv.length() > 4 ? mv.substring(4) : "";
+        int fsq = Chess.sqFromName(mv.substring(0, 2));
+        final int piece = fsq >= 0 ? tr.pos.cb[fsq] : 0;
+        final String text = Markers.label(piece, mv.substring(0, 2), mv.substring(2, 4), promo, myTurn);
+
+        StringBuilder info = new StringBuilder();
+        info.append("depth ").append(depth);
+        if (mate != 0) info.append("   mate in ").append(Math.abs(mate));
+        else info.append(String.format(Locale.US, "   %+.2f", cp / 100.0));
+
+        postSafe(() -> {
+            if (overlay != null) {
+                overlay.board = prefs.boardRect();
+                overlay.applyPrefs(prefs);
+                overlay.setHint(fromIdx, toIdx, text, info.toString());
+            }
+            buzz();
+            finishBusy(text);
+        });
     }
 
     // ==================================================================== auto mode
@@ -1023,15 +1168,19 @@ public class OverlayService extends Service implements
     private boolean autoRunning;
 
     private final Runnable autoTick = new Runnable() {
-        @Override public void run() {
-            if (!prefs.auto()) { autoRunning = false; return; }
+        @Override
+        public void run() {
+            if (destroyed || !prefs.auto()) {
+                autoRunning = false;
+                return;
+            }
             if (!busy && grab != null) checkAuto();
-            main.postDelayed(this, 1000);
+            main.postDelayed(this, 1100);
         }
     };
 
     private void startAuto() {
-        if (autoRunning) return;
+        if (autoRunning || destroyed) return;
         autoRunning = true;
         main.removeCallbacks(autoTick);
         main.postDelayed(autoTick, 600);
@@ -1043,6 +1192,7 @@ public class OverlayService extends Service implements
     }
 
     private void checkAuto() {
+        if (destroyed || grab == null) return;
         busy = true;
         if (overlay != null) overlay.setBusy(true);
         worker.post(() -> {
@@ -1050,7 +1200,7 @@ public class OverlayService extends Service implements
             Rect r = prefs.boardRect();
             Vision.Result res = null;
             try {
-                bmp = grab.grabWait(1500);
+                bmp = grab.grabWait(1200);
                 if (bmp != null && r != null) res = Vision.read(bmp, r);
             } catch (Throwable t) {
                 CrashGuard.record(this, "auto read", t);
@@ -1081,17 +1231,27 @@ public class OverlayService extends Service implements
 
     public static boolean isRunning() { return INSTANCE != null && !INSTANCE.destroyed; }
 
-    public static boolean hasCapture() { return INSTANCE != null && INSTANCE.grab != null; }
+    public static boolean hasCapture() { return isRunning() && INSTANCE.grab != null; }
 
-    public static int framesSeen() { return INSTANCE == null || INSTANCE.grab == null ? 0 : INSTANCE.grab.frameCount(); }
+    public static int framesSeen() {
+        return !isRunning() || INSTANCE.grab == null ? 0 : INSTANCE.grab.frameCount();
+    }
 
-    /** STOP from the app, the notification or the ♞ button: everything the app draws goes away */
+    /** STOP from the app, the notification or the ♞ button: everything the app draws goes away immediately. */
     public static void stopEverything(Context ctx) {
         final OverlayService s = INSTANCE;
-        if (s != null) {
-            MAIN.post(() -> { try { s.shutdown("Panel closed"); } catch (Throwable ignored) { } });
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (s != null) {
+                try { s.shutdown("Panel closed"); } catch (Throwable ignored) { }
+            }
+            purgeAllWindows();
         } else {
-            MAIN.post(OverlayService::purgeAllWindows);
+            MAIN.post(() -> {
+                if (s != null) {
+                    try { s.shutdown("Panel closed"); } catch (Throwable ignored) { }
+                }
+                purgeAllWindows();
+            });
         }
         if (ctx != null) {
             try { ctx.stopService(new Intent(ctx, OverlayService.class)); } catch (Throwable ignored) { }
@@ -1102,19 +1262,22 @@ public class OverlayService extends Service implements
 
     public static String lastTestResult() { return lastTest; }
 
-    /** grabs one picture right now and reports exactly what happened - for the TEST button */
+    /** Grabs one picture right now and reports what happened - for the TEST button. */
     public static void selfTest() {
         final OverlayService s = INSTANCE;
-        if (s == null) { lastTest = "panel is not running - press START PANEL first"; return; }
+        if (s == null || s.destroyed) { lastTest = "panel is not running - press START PANEL first"; return; }
         if (s.grab == null) { lastTest = "screen reading was never started - press START PANEL"; return; }
         lastTest = "testing... (one picture)";
+        final Runnable nudge = () -> s.main.post(() -> {
+            if (!s.destroyed && s.overlay != null) s.overlay.nudgeFrame();
+        });
         s.worker.post(() -> {
             String r;
             try {
                 long t0 = System.currentTimeMillis();
-                Bitmap b = s.grab.grabWait(5000);
+                Bitmap b = s.grab.grabFresh(3500, nudge);
                 if (b == null) {
-                    r = "FAILED: no picture after 5 s"
+                    r = "FAILED: no picture after 3.5 s"
                             + (s.grab.lastError().isEmpty() ? "" : " (" + s.grab.lastError() + ")");
                 } else {
                     r = "OK: " + b.getWidth() + "x" + b.getHeight() + " picture in "
@@ -1128,74 +1291,83 @@ public class OverlayService extends Service implements
         });
     }
 
-    /** hides only the floating ♞ button, marks stay visible (START PANEL brings it back) */
+    /** Hides only the floating ♞ button, marks stay visible (START PANEL brings it back). */
     public static void hideBubbleOnly() {
         final OverlayService s = INSTANCE;
-        if (s == null) { MAIN.post(OverlayService::purgeAllWindows); return; }
+        if (s == null || s.destroyed) { MAIN.post(OverlayService::purgeAllWindows); return; }
         MAIN.post(() -> { try { s.onHideBubble(); } catch (Throwable ignored) { } });
     }
 
-    /** sweeps away any ♞ / panel / marks that survived a crash - called whenever the app opens */
+    /** Sweeps away any ♞ / panel / marks that survived an earlier session and collapses open menus when app opens. */
     public static void cleanStrays(Context ctx) {
-        if (isRunning()) return;
-        MAIN.post(OverlayService::purgeAllWindows);
-        if (ctx != null) { try { ctx.stopService(new Intent(ctx, OverlayService.class)); } catch (Throwable ignored) { } }
+        if (!isRunning()) {
+            purgeAllWindows();
+            if (ctx != null) {
+                try { ctx.stopService(new Intent(ctx, OverlayService.class)); } catch (Throwable ignored) { }
+            }
+            return;
+        }
+        MAIN.post(() -> {
+            OverlayService s = INSTANCE;
+            if (s != null && !s.destroyed) {
+                s.hidePanel();
+                s.hideCalibration();
+                s.hideEditor();
+            }
+        });
     }
 
     public static void settingsChanged() {
-        if (INSTANCE == null) return;
-        INSTANCE.main.post(INSTANCE::applySettingsNow);
+        if (INSTANCE == null || INSTANCE.destroyed) return;
+        INSTANCE.postSafe(INSTANCE::applySettingsNow);
     }
 
-    /** stop a dead capture and ask for a fresh permission - used by the RETRY button */
+    /** Releases only the dead capture session in preparation for a fresh permission token. */
     public static void retryCapture() {
-        if (INSTANCE == null) return;
+        if (INSTANCE == null || INSTANCE.destroyed) return;
         INSTANCE.main.post(() -> {
             OverlayService s = INSTANCE;
-            try {
-                if (s.grab != null) { s.grab.release(); s.grab = null; }
-                if (s.projection != null) { s.projection.stop(); s.projection = null; }
-            } catch (Throwable ignored) { }
+            if (s == null || s.destroyed) return;
+            s.releaseCaptureOnly();
             s.lastProblem = "";
-            s.stopSelf();
         });
     }
 
     public static void requestHintNow() {
-        if (INSTANCE == null) return;
-        INSTANCE.main.post(() -> INSTANCE.requestHint(false));
+        if (INSTANCE == null || INSTANCE.destroyed) return;
+        INSTANCE.postSafe(() -> INSTANCE.requestHint(false));
     }
 
     public static void requestCalibration() {
-        if (INSTANCE == null) return;
-        INSTANCE.main.post(() -> INSTANCE.showCalibration(INSTANCE.prefs.boardRect()));
+        if (INSTANCE == null || INSTANCE.destroyed) return;
+        INSTANCE.postSafe(() -> INSTANCE.showCalibration(INSTANCE.prefs.boardRect()));
     }
 
     public static void requestAutoDetect() {
-        if (INSTANCE == null) return;
-        INSTANCE.main.post(() -> INSTANCE.autoDetectBoard(false));
+        if (INSTANCE == null || INSTANCE.destroyed) return;
+        INSTANCE.postSafe(() -> INSTANCE.autoDetectBoard(false));
     }
 
     public static void requestEditor() {
-        if (INSTANCE == null) return;
-        INSTANCE.main.post(INSTANCE::showEditor);
+        if (INSTANCE == null || INSTANCE.destroyed) return;
+        INSTANCE.postSafe(INSTANCE::showEditor);
     }
 
     public static void newGame() {
-        if (INSTANCE == null) return;
-        INSTANCE.main.post(INSTANCE::onNewGame);
+        if (INSTANCE == null || INSTANCE.destroyed) return;
+        INSTANCE.postSafe(INSTANCE::onNewGame);
     }
 
     public static String currentFen() {
-        return INSTANCE == null || INSTANCE.track == null ? null : INSTANCE.track.pos.fen();
+        return !isRunning() || INSTANCE.track == null ? null : INSTANCE.track.pos.fen();
     }
 
     public static String diagnostics() {
-        return INSTANCE == null ? "panel not running" : diagnosticsText(INSTANCE);
+        return !isRunning() ? "panel not running" : diagnosticsText(INSTANCE);
     }
 
     public static String currentInfo() {
-        if (INSTANCE == null) return "Panel is not running.";
+        if (!isRunning()) return "Panel is not running.";
         OverlayService s = INSTANCE;
         return "Screen capture: " + (s.grab != null ? "yes" : "no") + "\n"
                 + "Engine: " + (s.engine != null && s.engine.isAlive() ? "ready" : "starting") + "\n"
@@ -1204,14 +1376,17 @@ public class OverlayService extends Service implements
     }
 
     public static void applyFen(String fen) {
-        if (INSTANCE == null) return;
-        INSTANCE.main.post(() -> INSTANCE.doApplyFen(fen));
+        if (INSTANCE == null || INSTANCE.destroyed) return;
+        INSTANCE.postSafe(() -> INSTANCE.doApplyFen(fen));
     }
 
     private void doApplyFen(String fen) {
         try {
             Board b = Board.fromFen(fen, prefs.whiteBottom());
-            if (b.validate(prefs.whiteBottom()).contains("king")) { toast("That FEN has no proper kings"); return; }
+            if (b.validate(prefs.whiteBottom()).contains("king")) {
+                toast("That FEN has no proper kings");
+                return;
+            }
             String[] parts = fen.trim().split("\\s+");
             int side = (parts.length > 1 && parts[1].toLowerCase().startsWith("b")) ? Chess.BLACK : Chess.WHITE;
             Chess.Pos p = Chess.fromBoard(b, prefs.whiteBottom(), side);

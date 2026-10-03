@@ -2,7 +2,6 @@ package com.chesshint.panel;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Rect;
@@ -49,7 +48,10 @@ public class OverlayView extends View {
     private String chipText, chipSub;
     private long chipAt;
     private boolean busy;
-    private Runnable onChipTap;
+
+    // capture helper: temporarily hides board marks during screen read + nudges SurfaceFlinger
+    private volatile boolean captureClean = false;
+    private int nudgeTick = 0;
 
     public OverlayView(Context c) {
         super(c);
@@ -82,6 +84,7 @@ public class OverlayView extends View {
         this.label = label;
         this.info = info;
         hintAt = System.currentTimeMillis();
+        captureClean = false;
         invalidate();
     }
 
@@ -92,6 +95,21 @@ public class OverlayView extends View {
     }
 
     public boolean hasHint() { return fromIdx >= 0 && toIdx >= 0; }
+    public int getFromIdx() { return fromIdx; }
+    public int getToIdx() { return toIdx; }
+
+    /** Temporarily hides board marks while capturing a screenshot so marks never pollute Vision.read(). */
+    public void setCaptureClean(boolean clean) {
+        captureClean = clean;
+        nudgeTick++;
+        invalidate();
+    }
+
+    /** Alternates a 1x1 alpha=1 pixel at (0,0) so SurfaceFlinger emits a VirtualDisplay frame even on a static screen. */
+    public void nudgeFrame() {
+        nudgeTick++;
+        invalidate();
+    }
 
     /** short lived message near the bottom of the screen */
     public void setStatus(String s, String sub) {
@@ -122,6 +140,15 @@ public class OverlayView extends View {
 
     private void drawAll(Canvas c) {
         super.onDraw(c);
+
+        // 1x1 imperceptible pixel at (0,0) that changes alpha between 1/255 and 2/255 when nudged,
+        // forcing Android's display compositor to push a fresh frame to VirtualDisplay.
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(((nudgeTick & 1) == 0) ? 0x01000000 : 0x02000000);
+        c.drawRect(0, 0, 1, 1, fill);
+
+        if (captureClean) return;
+
         long now = System.currentTimeMillis();
 
         if (board != null && showFrame) drawFrame(c);

@@ -1,6 +1,5 @@
 package com.chesshint.panel;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -9,7 +8,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
@@ -51,8 +49,6 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         starting = false;
-        // whenever the home screen comes up: if the panel is not running, sweep away any
-        // floating ♞ / panel / marks that survived an earlier session
         try { OverlayService.cleanStrays(this); } catch (Throwable ignored) { }
         captureGranted = OverlayService.isRunning() && OverlayService.hasCapture();
         refresh();
@@ -75,7 +71,7 @@ public class MainActivity extends Activity {
         bar.addView(icon);
         LinearLayout titles = Ui.column(this);
         titles.addView(Ui.text(this, "Chess Hint Panel", 15.5f, Ui.TEXT, true));
-        titles.addView(Ui.text(this, "v1.5  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
+        titles.addView(Ui.text(this, "v1.6  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
         bar.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView gear = Ui.text(this, "\u2699", 22f, Ui.TEXT, false);
         gear.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 4), 0);
@@ -104,7 +100,10 @@ public class MainActivity extends Activity {
         overlayRow = permRow(card, "Display over other apps", "lets the panel float above your chess app");
         overlayRow.setOnClickListener(v -> openOverlaySettings());
         captureRow = permRow(card, "Screen reading", "lets the panel see the board (offline, nothing is uploaded)");
-        captureRow.setOnClickListener(v -> { if (!OverlayService.isRunning()) onAction(); });
+        captureRow.setOnClickListener(v -> {
+            if (!OverlayService.hasCapture()) retryScreenReading();
+            else toast("Screen reading is active");
+        });
 
         root.addView(card, Ui.lpTop(this, 0, 12));
 
@@ -116,10 +115,7 @@ public class MainActivity extends Activity {
         problemText.setLineSpacing(Ui.dp(this, 3), 1f);
         problemCard.addView(problemText, Ui.lpTop(this, 0, 4));
         LinearLayout pr = Ui.row(this);
-        pr.addView(Ui.primaryButton(this, "RETRY SCREEN READING", 0xFFFF5C6C, 0xFF2A0810, v -> {
-            OverlayService.retryCapture();
-            new android.os.Handler().postDelayed(this::onAction, 900);
-        }), weight());
+        pr.addView(Ui.primaryButton(this, "RETRY SCREEN READING", 0xFFFF5C6C, 0xFF2A0810, v -> retryScreenReading()), weight());
         problemCard.addView(pr, Ui.lpTop(this, 0, 10));
         LinearLayout pr2 = Ui.row(this);
         pr2.addView(Ui.ghostButton(this, "Share log", v -> shareLog()), weight());
@@ -186,11 +182,11 @@ public class MainActivity extends Activity {
         diag.addView(dr, Ui.lpTop(this, 0, 6));
         LinearLayout dr2 = Ui.row(this);
         dr2.addView(Ui.ghostButton(this, "Close floating icon", v -> {
-            OverlayService.purgeAllWindows();
+            OverlayService.stopEverything(this);
+            refresh();
             toast("Floating icons removed");
-            new android.os.Handler().postDelayed(this::refresh, 300);
         }), weight());
-        dr2.addView(Ui.ghostButton(this, "Retry screen reading", v -> onAction()), weight());
+        dr2.addView(Ui.ghostButton(this, "Retry screen reading", v -> retryScreenReading()), weight());
         diag.addView(dr2, Ui.lpTop(this, 0, 8));
         LinearLayout dr3 = Ui.row(this);
         dr3.addView(Ui.ghostButton(this, "Clear log", v -> {
@@ -206,7 +202,7 @@ public class MainActivity extends Activity {
         dr4.addView(Ui.primaryButton(this, "TEST SCREEN READING", Ui.ACCENT2, 0xFF06121F, v -> {
             OverlayService.selfTest();
             toast("Testing one picture...");
-            new android.os.Handler().postDelayed(this::refresh, 2500);
+            new android.os.Handler().postDelayed(this::refresh, 1200);
         }), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         diag.addView(dr4, Ui.lpTop(this, 0, 8));
         root.addView(diag, Ui.lpTop(this, 0, 12));
@@ -215,9 +211,9 @@ public class MainActivity extends Activity {
         LinearLayout how = Ui.card(this);
         how.addView(Ui.sectionTitle(this, "HOW TO USE"));
         how.addView(Ui.text(this, "1.  Allow both permissions above, then press START PANEL.\n"
-                + "2.  Open your chess game — your pieces must be at the BOTTOM (use FLIP in the ♞ panel if not).\n"
+                + "2.  Open your chess game — your pieces must be at the BOTTOM (use ME: WHITE/BLACK in the ♞ panel if not).\n"
                 + "3.  Tap the floating ♞ → SHOW MY MOVE.  The arrow tells you exactly which piece to move and where.\n"
-                + "4.  Turn AUTO on for a hint on every one of your turns.  While the enemy is thinking it stays quiet.",
+                + "4.  Tap the red ✕ on the ♞ bubble (or ✖ STOP & CLOSE inside the panel) to close it anytime.",
                 12.5f, Ui.TEXT_DIM, false), Ui.lpTop(this, 0, 6));
         root.addView(how, Ui.lpTop(this, 0, 12));
 
@@ -255,10 +251,21 @@ public class MainActivity extends Activity {
         if (starting) { toast("Already starting..."); return; }
         if (OverlayService.isRunning()) {
             OverlayService.stopEverything(this);
-            new android.os.Handler().postDelayed(this::refresh, 350);
+            refresh();
             toast("Panel stopped — floating ♞ removed");
             return;
         }
+        requestScreenCapture();
+    }
+
+    private void retryScreenReading() {
+        if (starting) { toast("Already starting..."); return; }
+        problemDismissed = false;
+        OverlayService.retryCapture();
+        requestScreenCapture();
+    }
+
+    private void requestScreenCapture() {
         if (!Settings.canDrawOverlays(this)) {
             toast("First allow \"Display over other apps\"");
             openOverlaySettings();
@@ -295,6 +302,7 @@ public class MainActivity extends Activity {
         if (req != REQ_CAPTURE) return;
         starting = false;
         if (res == RESULT_OK && data != null) {
+            problemDismissed = false;
             Intent i = new Intent(this, OverlayService.class);
             i.putExtra(OverlayService.EXTRA_CODE, res);
             i.putExtra(OverlayService.EXTRA_DATA, data);
@@ -306,9 +314,10 @@ public class MainActivity extends Activity {
             } catch (Throwable t) {
                 toast("Could not start the panel: " + t.getMessage());
             }
-            new android.os.Handler().postDelayed(this::refresh, 1200);
+            new android.os.Handler().postDelayed(this::refresh, 700);
         } else {
             toast("Screen reading was cancelled");
+            refresh();
         }
     }
 
@@ -337,13 +346,11 @@ public class MainActivity extends Activity {
         actionBtn.setBackground(Ui.round(running ? 0xFF2A1620 : Ui.ACCENT, 0, this, 14));
         actionBtn.setTextColor(running ? 0xFFFF7B8A : 0xFF06210F);
 
-        // shortcuts need the panel running
         if (diagText != null) {
             String info = OverlayService.diagnostics();
             diagText.setText(info);
         }
 
-        // ---- problem card
         String problem = OverlayService.lastProblem();
         if (problem == null || problem.isEmpty()) problem = firstLine(CrashGuard.lastCrash(this));
         boolean show = problem != null && !problem.isEmpty() && !problemDismissed;
@@ -366,11 +373,10 @@ public class MainActivity extends Activity {
         return i < 0 ? s.trim() : s.substring(0, i).trim();
     }
 
-    /** opens the Android share sheet with the full log - so a problem can be reported easily */
     private void shareLog() {
         try {
             StringBuilder sb = new StringBuilder();
-            sb.append("Chess Hint Panel ").append("1.5").append("\n");
+            sb.append("Chess Hint Panel ").append("1.6").append("\n");
             sb.append("android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (api ").append(android.os.Build.VERSION.SDK_INT).append(")\n");
             sb.append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL).append("\n\n");
