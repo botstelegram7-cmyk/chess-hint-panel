@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.5 — current
+**Extra safety nets around the two problems reported in 1.4's report**
+
+* **Frames no longer depend on a listener callback at all**: `grab()` also calls
+  `acquireLatestImage()` directly, so a ROM that never fires the listener can still be read.
+* **TEST SCREEN READING** button on the home screen: grabs one picture immediately and prints the
+  truth - `OK: 1080x2340 picture in 240 ms, 12 total` or `FAILED: no picture after 5 s (reason)`.
+  The result is also written into Diagnostics and the log.
+* **The notification STOP is now a broadcast receiver**, so it also works when the service has
+  already died - the exact case where a floating ♞ used to stay on screen for ever. Closing the
+  panel also cancels the notification.
+* Double-tap protection on START PANEL (one capture dialog at a time, no stacked sessions).
+* Diagnostics now lists the number of floating windows and the last screen-test result.
+
 ## v1.4 — current
 **Screen reading fixed + the floating ♞ can no longer pile up**
 

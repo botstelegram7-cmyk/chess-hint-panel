@@ -218,8 +218,8 @@ public class OverlayService extends Service implements
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        PendingIntent stop = PendingIntent.getService(this, 1,
-                new Intent(this, OverlayService.class).setAction(ACTION_STOP),
+        PendingIntent stop = PendingIntent.getBroadcast(this, 1,
+                new Intent(this, StopReceiver.class).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat)
@@ -516,6 +516,10 @@ public class OverlayService extends Service implements
             try { if (projection != null) { projection.stop(); projection = null; } } catch (Throwable ignored) { }
         });
         try { stopForeground(true); } catch (Throwable ignored) { }
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            nm.cancel(NOTIF_ID);
+        } catch (Throwable ignored) { }
         try { stopSelf(); } catch (Throwable ignored) { }
     }
 
@@ -566,6 +570,7 @@ public class OverlayService extends Service implements
                     .append(g.lastFrameLookedBlank() ? "  (blank)" : "").append('\n');
         }
         sb.append("floating windows: ").append(windowCount()).append('\n');
+        if (!lastTest.isEmpty()) sb.append("screen test: ").append(lastTest).append('\n');
         sb.append("engine: ").append(s.engine != null && s.engine.isAlive() ? "ready" : "not running")
                 .append("  (hash 16 MB)").append('\n');
         Rect r = s.prefs.boardRect();
@@ -1091,6 +1096,36 @@ public class OverlayService extends Service implements
         if (ctx != null) {
             try { ctx.stopService(new Intent(ctx, OverlayService.class)); } catch (Throwable ignored) { }
         }
+    }
+
+    private static volatile String lastTest = "";
+
+    public static String lastTestResult() { return lastTest; }
+
+    /** grabs one picture right now and reports exactly what happened - for the TEST button */
+    public static void selfTest() {
+        final OverlayService s = INSTANCE;
+        if (s == null) { lastTest = "panel is not running - press START PANEL first"; return; }
+        if (s.grab == null) { lastTest = "screen reading was never started - press START PANEL"; return; }
+        lastTest = "testing... (one picture)";
+        s.worker.post(() -> {
+            String r;
+            try {
+                long t0 = System.currentTimeMillis();
+                Bitmap b = s.grab.grabWait(5000);
+                if (b == null) {
+                    r = "FAILED: no picture after 5 s"
+                            + (s.grab.lastError().isEmpty() ? "" : " (" + s.grab.lastError() + ")");
+                } else {
+                    r = "OK: " + b.getWidth() + "x" + b.getHeight() + " picture in "
+                            + (System.currentTimeMillis() - t0) + " ms, " + s.grab.frameCount() + " total"
+                            + (s.grab.lastFrameLookedBlank() ? " - but it looks blank/protected" : "");
+                    b.recycle();
+                }
+            } catch (Throwable t) { r = "FAILED: " + describe(t); }
+            final String fr = r;
+            s.postSafe(() -> { lastTest = fr; s.setStatus("Screen test " + fr, null); });
+        });
     }
 
     /** hides only the floating ♞ button, marks stay visible (START PANEL brings it back) */

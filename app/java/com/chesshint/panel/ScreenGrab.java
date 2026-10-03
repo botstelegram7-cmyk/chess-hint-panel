@@ -175,6 +175,16 @@ public class ScreenGrab {
         synchronized (lock) {
             if (pending != null) { im = pending; pending = null; }
         }
+        if (im == null) {
+            // belt and braces: poll the reader directly. Some ROMs deliver frames without ever
+            // calling the listener, and then grabWait() would wait for ever.
+            try {
+                if (reader != null) {
+                    im = reader.acquireLatestImage();
+                    if (im != null) lastFrameAt = System.currentTimeMillis();
+                }
+            } catch (Throwable ignored) { }
+        }
         if (im == null) return null;
         Bitmap bmp = null;
         try {
