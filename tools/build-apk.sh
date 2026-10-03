@@ -9,8 +9,8 @@ AJAR="${ANDROID_JAR:-$SDK/platforms/android-34/android.jar}"
 JDK_HOME="${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")}"
 OUT="$ROOT/build/out"
 APP="$ROOT/app"
-VER_CODE="${VERSION_CODE:-7}"
-VER_NAME="${VERSION_NAME:-1.6}"
+VER_CODE="${VERSION_CODE:-9}"
+VER_NAME="${VERSION_NAME:-1.8}"
 JAVAC="$JDK_HOME/bin/javac"; [ -x "$JAVAC" ] || JAVAC=javac
 KEYTOOL="$JDK_HOME/bin/keytool"; [ -x "$KEYTOOL" ] || KEYTOOL=keytool
 rm -rf "$OUT/gen" "$OUT/classes" "$OUT/dex"
@@ -19,7 +19,7 @@ mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex"
 echo "== resources =="
 "$BT/aapt2" compile --dir "$APP/res" -o "$OUT/res.zip"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$AJAR" --manifest "$APP/AndroidManifest.xml" \
-  --java "$OUT/gen" --min-sdk-version 26 --target-sdk-version 34 \
+  --java "$OUT/gen" --min-sdk-version 26 --target-sdk-version 28 \
   --version-code "$VER_CODE" --version-name "$VER_NAME" --auto-add-overlay "$OUT/res.zip"
 
 echo "== java =="

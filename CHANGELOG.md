@@ -1,6 +1,32 @@
 # Changelog
 
-## v1.7 — current
+## v1.8 — current
+**Fixed Android 10 (API 29 / Realme RMX2030) `"Screen reading was stopped by the system"` & native engine lifecycle**
+
+* **Fixed Android 10 (`API 29`) `MediaProjectionManagerService.handleForegroundServicesChanged` race**:
+  In Android 10 AOSP (`MediaProjectionManagerService.java`), `IProcessObserver.onForegroundServicesChanged(pid, uid, serviceTypes)`
+  is delivered asynchronously from `ActivityManagerService`'s `mPendingProcessChanges` queue and checks
+  `requiresForegroundService()` (`mTargetSdkVersion >= 29`) and `(serviceTypes & FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) != 0`.
+  When `getMediaProjection()` was called 0 ms after `startForeground()`, any in-flight `ProcessChangeItem` with
+  `serviceTypes == 0` arriving 1 ms later caused `MediaProjectionManagerService` to call `mProjectionGrant.stop()`,
+  firing `projCallback.onStop()` (`"Screen reading was stopped by the system — press RETRY"`).
+  * `OverlayService` now enters `startForeground(..., FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)` immediately in
+    `onCreate()` and `onStartCommand()`, lets the FGS transition settle before calling `getMediaProjection()`,
+    never downgrades the FGS type via 2-arg `startForeground`, and targets SDK 28 (`< Build.VERSION_CODES.Q`)
+    so `MediaProjectionManagerService.requiresForegroundService()` never kills active projections on Android 10.
+  * Added automatic `MediaProjection` recovery on Android < 14 (re-acquires up to 3 times if the OS ever
+    stops the projection grant during transition).
+  * `ScreenGrab.init()` (`ImageReader.newInstance` + `projection.createVirtualDisplay`) now runs immediately on
+    the main thread right after `getMediaProjection()` instead of waiting behind Stockfish initialization on `worker`.
+* **Fixed native `UciEngine` shutdown `SIGABRT` & 5-second worker freeze on service restart**:
+  `UciEngine` is now a process-wide singleton (`UciEngine.getInstance()`) initialized on its own dedicated
+  `engine-init` thread (never blocking `hint-worker`). Stopping the panel sends `"stop"` instead of `"quit"`,
+  keeping the native Stockfish thread alive across restarts and avoiding Android ART's fatal
+  `Native thread exiting without having called DetachCurrentThread` abort.
+* **Full multi-entry diagnostic log history (`CrashGuard`)**: `lastCrash()` now returns the full recent log
+  (up to 8 KB) with lifecycle step breadcrumbs instead of truncating everything before the last divider.
+
+## v1.7
 **Fixed crash when granting Screen Recording permission**
 
 * **Fixed `ForegroundServiceDidNotStartInTimeException` on `onActivityResult` → `onResume`**:

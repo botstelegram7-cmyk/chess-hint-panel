@@ -73,7 +73,7 @@ public class MainActivity extends Activity {
         bar.addView(icon);
         LinearLayout titles = Ui.column(this);
         titles.addView(Ui.text(this, "Chess Hint Panel", 15.5f, Ui.TEXT, true));
-        titles.addView(Ui.text(this, "v1.7  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
+        titles.addView(Ui.text(this, "v1.8  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
         bar.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView gear = Ui.text(this, "\u2699", 22f, Ui.TEXT, false);
         gear.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 4), 0);
@@ -305,6 +305,8 @@ public class MainActivity extends Activity {
         starting = false;
         if (res == RESULT_OK && data != null) {
             problemDismissed = false;
+            CrashGuard.clearLastProblem();
+            CrashGuard.step(this, "onActivityResult RESULT_OK");
             // Mark starting BEFORE startForegroundService so onResume() (which runs 1ms later)
             // never calls stopService() and causes ForegroundServiceDidNotStartInTimeException!
             OverlayService.markStarting(res, data);
@@ -369,7 +371,9 @@ public class MainActivity extends Activity {
         }
 
         String problem = OverlayService.lastProblem();
-        if (problem == null || problem.isEmpty()) problem = firstLine(CrashGuard.lastCrash(this));
+        if ((problem == null || problem.isEmpty()) && !running && !isStarting) {
+            problem = CrashGuard.lastProblemSummary();
+        }
         boolean show = problem != null && !problem.isEmpty() && !problemDismissed;
         problemCard.setVisibility(show ? View.VISIBLE : View.GONE);
         if (show) problemText.setText(problem);
@@ -393,7 +397,7 @@ public class MainActivity extends Activity {
     private void shareLog() {
         try {
             StringBuilder sb = new StringBuilder();
-            sb.append("Chess Hint Panel ").append("1.7").append("\n");
+            sb.append("Chess Hint Panel ").append("1.8").append("\n");
             sb.append("android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (api ").append(android.os.Build.VERSION.SDK_INT).append(")\n");
             sb.append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL).append("\n\n");

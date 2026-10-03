@@ -12,7 +12,7 @@ KS="${KEYSTORE:-$ROOT/build/keystore.jks}"
 PASS="${KEYSTORE_PASS:-chesshint}"
 OUT="$ROOT/build/out"
 LIBS="$ROOT/build/jnilibs"
-VER="${VERSION_NAME:-1.7}"
+VER="${VERSION_NAME:-1.8}"
 STAGE="$OUT/stage"
 [ -f "$OUT/dex/classes.dex" ] || { echo "run tools/build-apk.sh first"; exit 1; }
 [ -f "$LIBS/libstockfish.so.arm64-v8a" ] || { echo "run tools/build-stockfish-android.sh first"; exit 1; }
@@ -32,7 +32,7 @@ if [ ! -f "$KS" ]; then
     -storepass "$PASS" -keypass "$PASS" -dname "CN=Chess Hint Panel, O=Chess Hint, C=IN"
 fi
 "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
-  --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+  --min-sdk-version 21 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
   --out "$OUT/ChessHintPanel-v$VER.apk" "$OUT/aligned.apk"
 "$BT/apksigner" verify "$OUT/ChessHintPanel-v$VER.apk"
 echo "APK -> $OUT/ChessHintPanel-v$VER.apk"

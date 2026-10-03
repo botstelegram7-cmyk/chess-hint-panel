@@ -23,7 +23,7 @@ import java.nio.ByteBuffer;
 /**
  * Grabs frames of the phone screen (MediaProjection -> VirtualDisplay -> ImageReader).
  *
- * Key guarantees (v1.7):
+ * Key guarantees (v1.8):
  *  1) ImageReader listener runs on dedicated "chesshint-frames" HandlerThread, never on the hint
  *     worker thread, and ONLY swaps the lightweight Image reference `pending` (0 bytes allocated
  *     during 60 fps idle screen updates!).
@@ -124,62 +124,82 @@ public class ScreenGrab {
 
     public String lastError() { return lastError; }
 
-    /** Starts the virtual display; uses dedicated frameHandler() for both ImageReader and VirtualDisplay. */
+    private void attachReaderListener(ImageReader r, Handler fh) {
+        r.setOnImageAvailableListener(ir -> {
+            if (dead) return;
+            Image im = null;
+            try {
+                im = ir.acquireLatestImage();
+            } catch (Throwable t) {
+                synchronized (lock) {
+                    if (pending != null) {
+                        try { pending.close(); } catch (Throwable ignored) { }
+                        pending = null;
+                    }
+                }
+                try { im = ir.acquireNextImage(); } catch (Throwable ignored) { }
+            }
+            if (im != null) {
+                synchronized (lock) {
+                    if (dead) {
+                        try { im.close(); } catch (Throwable ignored) { }
+                        return;
+                    }
+                    if (pending != null) {
+                        try { pending.close(); } catch (Throwable ignored) { }
+                    }
+                    pending = im;
+                    lastFrameAt = System.currentTimeMillis();
+                    frameSeq++;
+                    lock.notifyAll();
+                }
+            }
+        }, fh);
+    }
+
+    /** Starts the virtual display; can be called on main thread right after getMediaProjection. */
     public synchronized boolean init() {
         if (dead) return false;
         Handler fh = frameHandler();
-        for (int attempt = 0; attempt < 3; attempt++) {
+        int[] flagOptions = new int[]{
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR | DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+        };
+        for (int attempt = 0; attempt < flagOptions.length; attempt++) {
             try {
                 Point p = realSize();
                 DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
                 w = p.x;
                 h = p.y;
                 dpi = dm.densityDpi;
-                reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3);
-                reader.setOnImageAvailableListener(r -> {
-                    if (dead) return;
-                    try {
-                        Image im = r.acquireLatestImage();
-                        if (im != null) {
-                            synchronized (lock) {
-                                if (dead) {
-                                    im.close();
-                                    return;
-                                }
-                                if (pending != null) {
-                                    try { pending.close(); } catch (Throwable ignored) { }
-                                }
-                                pending = im;
-                                lastFrameAt = System.currentTimeMillis();
-                                frameSeq++;
-                                lock.notifyAll();
-                            }
-                        }
-                    } catch (Throwable ignored) { }
-                }, fh);
+                reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 4);
+                attachReaderListener(reader, fh);
                 vd = projection.createVirtualDisplay(
                         "chesshint",
                         w,
                         h,
                         dpi,
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        flagOptions[attempt],
                         reader.getSurface(),
                         null,
                         fh);
                 if (vd != null) {
                     lastError = "";
+                    CrashGuard.step(ctx, "createVirtualDisplay OK " + w + "x" + h + "@" + dpi + " flags=" + flagOptions[attempt]);
                     return true;
                 }
                 lastError = "virtual display was refused";
             } catch (Throwable t) {
                 lastError = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : ": " + t.getMessage());
+                CrashGuard.step(ctx, "createVirtualDisplay err attempt " + attempt + ": " + lastError);
                 if (Build.VERSION.SDK_INT >= 34) {
                     releaseDisplay();
                     break;
                 }
             }
             releaseDisplay();
-            try { Thread.sleep(250); } catch (InterruptedException ignored) { }
+            try { Thread.sleep(150); } catch (InterruptedException ignored) { }
         }
         return false;
     }
@@ -200,28 +220,8 @@ public class ScreenGrab {
                     }
                 }
                 ImageReader oldReader = reader;
-                ImageReader newReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3);
-                newReader.setOnImageAvailableListener(r -> {
-                    if (dead) return;
-                    try {
-                        Image im = r.acquireLatestImage();
-                        if (im != null) {
-                            synchronized (lock) {
-                                if (dead) {
-                                    im.close();
-                                    return;
-                                }
-                                if (pending != null) {
-                                    try { pending.close(); } catch (Throwable ignored) { }
-                                }
-                                pending = im;
-                                lastFrameAt = System.currentTimeMillis();
-                                frameSeq++;
-                                lock.notifyAll();
-                            }
-                        }
-                    } catch (Throwable ignored) { }
-                }, fh);
+                ImageReader newReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 4);
+                attachReaderListener(newReader, fh);
                 reader = newReader;
                 if (vd != null) {
                     vd.resize(w, h, dpi);
@@ -247,7 +247,7 @@ public class ScreenGrab {
         reader = null;
     }
 
-    /** Decodes an Image into a Bitmap safely on Demand, handling rowStride padding without 10MB temp buffers. */
+    /** Decodes an Image into a Bitmap safely on demand, handling rowStride padding without 10MB temp buffers. */
     private Bitmap decodeImage(Image im) {
         Image.Plane[] planes = im.getPlanes();
         if (planes == null || planes.length == 0) return null;
@@ -379,38 +379,48 @@ public class ScreenGrab {
             Bitmap b = grab();
             if (b != null) return b;
             long now = System.currentTimeMillis();
-            if (nudge != null && now - lastNudge >= 120) {
+            if (nudge != null && now - lastNudge >= 100) {
                 lastNudge = now;
                 try { nudge.run(); } catch (Throwable ignored) { }
             }
             synchronized (lock) {
-                try { lock.wait(50); } catch (InterruptedException ignored) { }
+                try { lock.wait(45); } catch (InterruptedException ignored) { }
             }
         }
         return grab();
     }
 
     /**
-     * Waits up to ms for a NEW frame arriving after this call starts (e.g. after hiding the panel/marks),
-     * falling back to the cached lastBitmap if the screen is completely unchanged.
+     * Waits for a NEW frame arriving after this call starts (e.g. after hiding the panel/marks),
+     * falling back to the cached lastBitmap if the screen is completely static.
      */
     public Bitmap grabFresh(long ms, Runnable nudge) {
         if (dead) return null;
+        // Consume any pre-existing pending Image into lastBitmap first so we can detect a genuinely
+        // new frame arriving after this call starts, while keeping lastBitmap as a static-screen fallback.
+        Bitmap initial = grab();
+        if (initial != null) initial.recycle();
+
         long startSeq;
+        boolean hadCached;
         synchronized (lock) {
             startSeq = frameSeq;
+            hadCached = (lastBitmap != null && !lastBitmap.isRecycled());
         }
         if (nudge != null) {
             try { nudge.run(); } catch (Throwable ignored) { }
         }
+        // If we already have a cached frame, wait at most 420ms for SurfaceFlinger to send a newer
+        // frame; if the screen is static, return the cached frame immediately instead of blocking.
+        long waitLimit = hadCached ? Math.min(ms, 420L) : ms;
         long t0 = System.currentTimeMillis();
         long lastNudge = t0;
-        while (!dead && System.currentTimeMillis() - t0 < ms) {
+        while (!dead && System.currentTimeMillis() - t0 < waitLimit) {
             boolean hasNew;
             synchronized (lock) {
                 hasNew = (pending != null || frameSeq > startSeq);
                 if (!hasNew) {
-                    try { lock.wait(45); } catch (InterruptedException ignored) { }
+                    try { lock.wait(40); } catch (InterruptedException ignored) { }
                     hasNew = (pending != null || frameSeq > startSeq);
                 }
             }
@@ -419,12 +429,12 @@ public class ScreenGrab {
                 if (b != null) return b;
             }
             long now = System.currentTimeMillis();
-            if (nudge != null && now - lastNudge >= 120) {
+            if (nudge != null && now - lastNudge >= 100) {
                 lastNudge = now;
                 try { nudge.run(); } catch (Throwable ignored) { }
             }
         }
-        return grabWait(150, nudge);
+        return grabWait(hadCached ? 60L : 250L, nudge);
     }
 
     /** Grab a stable frame (waits for any piece movement animation to settle, never fails on a static screen). */
@@ -436,18 +446,18 @@ public class ScreenGrab {
         Bitmap prev = grabFresh(900, nudge);
         if (prev == null) return null;
         int[] prevSmall = thumb(prev, 24);
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 4; i++) {
             long seqBefore;
             synchronized (lock) {
                 seqBefore = frameSeq;
             }
-            try { Thread.sleep(95); } catch (InterruptedException ignored) { }
+            try { Thread.sleep(85); } catch (InterruptedException ignored) { }
             boolean arrived;
             synchronized (lock) {
                 arrived = (pending != null || frameSeq > seqBefore);
             }
             if (!arrived) {
-                // No new frame arrived in 95ms -> screen is static!
+                // No new frame arrived in 85ms -> screen is static!
                 return prev;
             }
             Bitmap next = grab();

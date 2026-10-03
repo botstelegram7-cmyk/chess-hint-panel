@@ -160,6 +160,10 @@ public class OverlayService extends Service implements
     private AndroidView editorHost;
 
     private volatile boolean busy;
+    private volatile boolean startingCapture;
+    private int lastCode;
+    private Intent lastData;
+    private int autoRecoveryCount;
     private String lastProblem = "";
     private boolean windowAdded;
     private int[] lastAutoPattern;
@@ -175,6 +179,7 @@ public class OverlayService extends Service implements
     public void onCreate() {
         super.onCreate();
         CrashGuard.install(this);
+        CrashGuard.step(this, "OverlayService.onCreate");
         if (INSTANCE != null && INSTANCE != this) {
             try { INSTANCE.shutdown(null); } catch (Throwable ignored) { }
         }
@@ -188,30 +193,36 @@ public class OverlayService extends Service implements
         workerThread = new HandlerThread("hint-worker");
         workerThread.start();
         worker = new Handler(workerThread.getLooper());
-        engine = new UciEngine();
+        engine = UciEngine.getInstance();
         createChannel();
+        goForeground("Starting panel…");
         prefs.raw().registerOnSharedPreferenceChangeListener(prefListener);
-        worker.post(() -> {
+        new Thread(() -> {
             if (destroyed) return;
             boolean ok;
             try {
                 engine.setBudget(Tune.EngineBudget.hashMb, Tune.EngineBudget.threads);
                 ok = engine.start();
+                CrashGuard.step(OverlayService.this, "engine.start=" + ok);
             } catch (Throwable t) {
-                CrashGuard.record(this, "engine start", t);
+                CrashGuard.record(OverlayService.this, "engine start", t);
                 ok = false;
             }
             final boolean started = ok;
-            postSafe(() -> setStatus(started ? "Ready" : "Engine error: " + UciEngine.libraryError(),
-                    started ? null : "tap STOP then START again"));
-        });
+            postSafe(() -> {
+                if (!started) {
+                    setStatus("Engine error: " + UciEngine.libraryError(), "tap STOP then START again");
+                }
+            });
+        }, "engine-init").start();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         try {
             if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-                goForegroundPlain("Stopping…");
+                CrashGuard.step(this, "onStartCommand ACTION_STOP");
+                releaseCaptureOnly();
                 shutdown("Panel closed");
                 return START_NOT_STICKY;
             }
@@ -219,6 +230,8 @@ public class OverlayService extends Service implements
                 destroyed = false;
                 INSTANCE = this;
             }
+
+            goForeground("Starting screen reading…");
 
             int code = pendingCode;
             Intent data = pendingData;
@@ -232,18 +245,28 @@ public class OverlayService extends Service implements
             clearStarting();
 
             if (data != null) {
-                startProjection(code, data);
-                main.postDelayed(this::ensureWindows, 120);
-            } else if (projection == null) {
-                goForegroundPlain("Stopping…");
+                lastCode = code;
+                lastData = new Intent(data);
+                autoRecoveryCount = 0;
+                startingCapture = true;
+                CrashGuard.step(this, "onStartCommand scheduling startProjection");
+                ensureWindows();
+                final int c = code;
+                final Intent d = lastData;
+                main.postDelayed(() -> {
+                    if (!destroyed && INSTANCE == OverlayService.this) {
+                        startProjection(c, d);
+                    }
+                }, 150);
+            } else if (projection == null && !startingCapture) {
+                CrashGuard.step(this, "onStartCommand no data & no projection -> shutdown");
                 shutdown(null);
                 return START_NOT_STICKY;
             } else {
-                main.postDelayed(this::ensureWindows, 120);
+                main.postDelayed(this::ensureWindows, 80);
             }
         } catch (Throwable t) {
             CrashGuard.record(this, "onStartCommand", t);
-            goForegroundPlain("Panel error");
             toast("Panel error: " + t.getClass().getSimpleName());
             shutdown(null);
         }
@@ -252,7 +275,9 @@ public class OverlayService extends Service implements
 
     @Override
     public void onDestroy() {
+        CrashGuard.step(this, "OverlayService.onDestroy");
         destroyed = true;
+        startingCapture = false;
         clearStarting();
         try { stopAuto(); } catch (Throwable ignored) { }
         try { main.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
@@ -332,7 +357,8 @@ public class OverlayService extends Service implements
 
     private void startProjection(int code, Intent data) {
         if (data == null) {
-            goForegroundPlain("Waiting for screen reading…");
+            startingCapture = false;
+            goForeground("Waiting for screen reading…");
             captureProblem("Screen reading data was empty — please try again");
             return;
         }
@@ -340,40 +366,27 @@ public class OverlayService extends Service implements
         // Cleanly release any previous projection/grab (unregistering callback first so it doesn't fire onStop!)
         releaseCaptureOnly();
         lastProblem = "";
+        CrashGuard.clearLastProblem();
 
-        // Start foreground service FIRST on all API levels (with MEDIA_PROJECTION type on API 29+)
+        // Keep foreground service with MEDIA_PROJECTION type active
         boolean foregroundDone = goForeground("Starting screen reading…");
 
         String firstError = "";
         try {
             MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
             projection = mpm.getMediaProjection(code, data);
+            CrashGuard.step(this, "getMediaProjection=" + (projection != null));
         } catch (Throwable t) {
             firstError = describe(t);
             projection = null;
-            CrashGuard.record(this, "getMediaProjection (foreground first)", t);
+            CrashGuard.record(this, "getMediaProjection", t);
         }
 
         if (projection == null) {
-            try {
-                MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-                projection = mpm.getMediaProjection(code, data);
-                if (projection != null && !foregroundDone) {
-                    foregroundDone = goForeground("Starting screen reading…");
-                }
-            } catch (Throwable t) {
-                CrashGuard.record(this, "getMediaProjection (fallback)", t);
-                if (!foregroundDone) goForegroundPlain("Screen reading problem");
-                captureProblem("Screen reading refused: " + describe(t)
-                        + (firstError.isEmpty() ? "" : " / " + firstError));
-                return;
-            }
-        }
-        if (!foregroundDone) {
-            goForegroundPlain("Ready — tap the ♞ button");
-        }
-        if (projection == null) {
-            captureProblem("Screen reading permission was not granted");
+            startingCapture = false;
+            if (!foregroundDone) goForeground("Screen reading problem");
+            captureProblem("Screen reading refused: "
+                    + (firstError.isEmpty() ? "permission was not granted" : firstError));
             return;
         }
 
@@ -382,8 +395,25 @@ public class OverlayService extends Service implements
             @Override
             public void onStop() {
                 if (destroyed || INSTANCE != OverlayService.this || projection != p) return;
+                CrashGuard.step(OverlayService.this, "projCallback.onStop fired (recovery=" + autoRecoveryCount + ")");
                 postSafe(() -> {
                     if (destroyed || INSTANCE != OverlayService.this || projection != p) return;
+                    releaseCaptureOnly();
+                    // On Android < 14 (including Android 10 / ColorOS / Realme UI), if the system
+                    // stops the first projection grant during the FGS transition, automatically
+                    // re-acquire using the saved consent Intent without interrupting the user.
+                    if (Build.VERSION.SDK_INT < 34 && lastData != null && autoRecoveryCount < 3) {
+                        autoRecoveryCount++;
+                        startingCapture = true;
+                        CrashGuard.step(OverlayService.this, "auto-recovering MediaProjection #" + autoRecoveryCount);
+                        main.postDelayed(() -> {
+                            if (!destroyed && INSTANCE == OverlayService.this) {
+                                startProjection(lastCode, new Intent(lastData));
+                            }
+                        }, 300);
+                        return;
+                    }
+                    startingCapture = false;
                     captureProblem("Screen reading was stopped by the system — press RETRY");
                 });
             }
@@ -392,26 +422,30 @@ public class OverlayService extends Service implements
             p.registerCallback(projCallback, main);
         } catch (Throwable ignored) { }
 
+        ensureWindows();
+
+        // Initialize VirtualDisplay immediately on the main thread right after getMediaProjection
+        ScreenGrab g = new ScreenGrab(this, p, worker);
+        if (!g.init()) {
+            startingCapture = false;
+            final String err = g.lastError();
+            g.release();
+            captureProblem("Screen capture failed" + (err.isEmpty() ? "" : " (" + err + ")"));
+            return;
+        }
+        grab = g;
+        startingCapture = false;
+
         final Runnable nudge = () -> main.post(() -> {
             if (!destroyed && overlay != null) overlay.nudgeFrame();
         });
 
         worker.post(() -> {
-            if (destroyed || projection != p) return;
+            if (destroyed || projection != p || grab != g) return;
             try {
-                ScreenGrab g = new ScreenGrab(this, p, worker);
-                if (!g.init()) {
-                    final String err = g.lastError();
-                    g.release();
-                    postSafe(() -> {
-                        ensureWindows();
-                        captureProblem("Screen capture failed" + (err.isEmpty() ? "" : " (" + err + ")"));
-                    });
-                    return;
-                }
-                grab = g;
                 Bitmap first = g.grabWait(4500, nudge);
                 if (first == null) {
+                    if (destroyed || projection != p || grab != g) return;
                     final String err = g.lastError();
                     postSafe(() -> {
                         ensureWindows();
@@ -421,6 +455,7 @@ public class OverlayService extends Service implements
                     });
                     return;
                 }
+                CrashGuard.step(this, "first frame OK " + first.getWidth() + "x" + first.getHeight());
                 if (g.lastFrameLookedBlank()) {
                     first.recycle();
                     postSafe(() -> {
@@ -442,6 +477,7 @@ public class OverlayService extends Service implements
             }
             postSafe(() -> {
                 lastProblem = "";
+                CrashGuard.clearLastProblem();
                 ensureWindows();
                 updateNotification("Ready — tap the ♞ button");
                 if (prefs.hasRect()) {
@@ -607,6 +643,7 @@ public class OverlayService extends Service implements
     /** One-tap close: marks + floating ♞ + panels disappear, notifications are dropped, service ends. */
     private void shutdown(String note) {
         destroyed = true;
+        startingCapture = false;
         clearStarting();
         try { stopAuto(); } catch (Throwable ignored) { }
         try { main.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
@@ -1275,7 +1312,9 @@ public class OverlayService extends Service implements
 
     public static boolean isRunning() { return INSTANCE != null && !INSTANCE.destroyed; }
 
-    public static boolean hasCapture() { return isRunning() && INSTANCE.grab != null; }
+    public static boolean hasCapture() {
+        return isRunning() && (INSTANCE.grab != null || INSTANCE.startingCapture);
+    }
 
     public static int framesSeen() {
         return !isRunning() || INSTANCE.grab == null ? 0 : INSTANCE.grab.frameCount();

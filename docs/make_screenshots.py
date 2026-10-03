@@ -5,9 +5,10 @@ They are faithful mockups of the real layouts (same colours, spacing and wording
 Java layouts in app/java/.../Ui.java, MainActivity.java, SettingsActivity.java, PanelView.java).
 """
 import math
+import os
 from PIL import Image, ImageDraw, ImageFont
 
-OUT = "/home/user/repo/chess-hint-panel/docs/screenshots"
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
 
 BG      = "#0A1119"
 CARD    = "#101A24"
@@ -69,7 +70,7 @@ def home(path, running=False, problem=None):
     # one-line top bar
     d.text((pad, 26), "♞", font=font(40), fill=YELLOW)
     d.text((pad + 52, 22), "Chess Hint Panel", font=font(30), fill=TEXT)
-    d.text((pad + 52, 58), "v1.3  •  Stockfish inside", font=font(21, False), fill=DIM)
+    d.text((pad + 52, 58), "v1.8  •  Stockfish inside", font=font(21, False), fill=DIM)
     d.text((W - pad - 28, 40), "⚙", font=font(40), fill=TEXT)
 
     # status card

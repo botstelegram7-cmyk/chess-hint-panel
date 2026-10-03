@@ -13,8 +13,14 @@ import java.util.concurrent.TimeUnit;
  */
 public class UciEngine {
 
+    private static UciEngine INSTANCE;
     private static boolean libOk;
     private static String libError = "";
+
+    public static synchronized UciEngine getInstance() {
+        if (INSTANCE == null) INSTANCE = new UciEngine();
+        return INSTANCE;
+    }
 
     private native void nativeInit();
     private native void nativeWrite(String cmd);
@@ -178,7 +184,10 @@ public class UciEngine {
     }
 
     public synchronized void stop() {
-        alive = false;
-        try { nativeWrite("quit"); } catch (Throwable ignored) { }
+        thinking = false;
+        best.clear();
+        if (alive) {
+            try { nativeWrite("stop"); } catch (Throwable ignored) { }
+        }
     }
 }

@@ -48,23 +48,41 @@ public class CrashGuard {
         }
     }
 
-    /** logs a plain message (no exception) - used for screen-reading problems */
-    public static void note(Context ctx, String where, String message) {
+    /** compact one-line breadcrumb for diagnostics (does not set lastMessage) */
+    public static synchronized void step(Context ctx, String msg) {
         try {
-            String line = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())
-                    + "  " + where + "\n" + message + "\ndevice: " + Build.MANUFACTURER + " " + Build.MODEL
-                    + "  android " + Build.VERSION.RELEASE + " (api " + Build.VERSION.SDK_INT + ")\n"
-                    + "--------------------------------------------\n";
-            File f = logFile != null ? logFile : new File(ctx.getFilesDir(), "panel-log.txt");
-            if (f.length() > 24000) f.delete();
+            String line = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date())
+                    + " [step] " + msg + "\n";
+            File f = logFile != null ? logFile : (ctx != null ? new File(ctx.getFilesDir(), "panel-log.txt") : null);
+            if (f == null) return;
+            if (f.length() > 32000) f.delete();
             java.io.FileOutputStream out = new java.io.FileOutputStream(f, true);
             out.write(line.getBytes("UTF-8"));
             out.close();
         } catch (Throwable ignored) { }
     }
 
-    public static void record(Context ctx, String where, Throwable t) {
+    /** logs a plain message (no exception) - used for screen-reading problems */
+    public static synchronized void note(Context ctx, String where, String message) {
         try {
+            lastMessage = message != null ? message : "";
+            String line = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())
+                    + "  " + where + "\n" + message + "\ndevice: " + Build.MANUFACTURER + " " + Build.MODEL
+                    + "  android " + Build.VERSION.RELEASE + " (api " + Build.VERSION.SDK_INT + ")\n"
+                    + "--------------------------------------------\n";
+            File f = logFile != null ? logFile : new File(ctx.getFilesDir(), "panel-log.txt");
+            if (f.length() > 32000) f.delete();
+            java.io.FileOutputStream out = new java.io.FileOutputStream(f, true);
+            out.write(line.getBytes("UTF-8"));
+            out.close();
+        } catch (Throwable ignored) { }
+    }
+
+    public static synchronized void record(Context ctx, String where, Throwable t) {
+        try {
+            String summary = where + ": " + t.getClass().getSimpleName()
+                    + (t.getMessage() == null ? "" : " (" + t.getMessage() + ")");
+            lastMessage = summary;
             StringWriter sw = new StringWriter();
             sw.append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()))
                     .append("  ").append(where).append('\n');
@@ -72,39 +90,52 @@ public class CrashGuard {
             sw.append("device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
                     .append("  android ").append(Build.VERSION.RELEASE).append(" (api ").append(String.valueOf(Build.VERSION.SDK_INT)).append(")\n");
             sw.append("--------------------------------------------\n");
-            lastMessage = sw.toString();
+            String entry = sw.toString();
             File f = logFile != null ? logFile : new File(ctx.getFilesDir(), "panel-log.txt");
-            if (f.length() > 24000) f.delete();
+            if (f.length() > 32000) f.delete();
             java.io.FileOutputStream out = new java.io.FileOutputStream(f, true);
-            out.write(lastMessage.getBytes("UTF-8"));
+            out.write(entry.getBytes("UTF-8"));
             out.close();
         } catch (Throwable ignored) {
             lastMessage = String.valueOf(t);
         }
     }
 
-    public static String lastCrash(Context ctx) {
+    public static String lastProblemSummary() {
+        return lastMessage != null ? lastMessage : "";
+    }
+
+    public static void clearLastProblem() {
+        lastMessage = "";
+    }
+
+    /** Returns the full recent log history (up to ~8 KB) so earlier exceptions are never hidden. */
+    public static synchronized String lastCrash(Context ctx) {
         try {
             File f = logFile != null ? logFile : new File(ctx.getFilesDir(), "panel-log.txt");
             if (!f.exists()) return "";
-            byte[] b = new byte[(int) Math.min(f.length(), 24000)];
+            long len = f.length();
+            int max = 8000;
+            byte[] b = new byte[(int) Math.min(len, max)];
             java.io.FileInputStream in = new java.io.FileInputStream(f);
+            if (len > max) {
+                long skip = len - max;
+                while (skip > 0) {
+                    long s = in.skip(skip);
+                    if (s <= 0) break;
+                    skip -= s;
+                }
+            }
             int n = in.read(b);
             in.close();
             if (n <= 0) return "";
-            String all = new String(b, 0, n, "UTF-8");
-            int cut = all.lastIndexOf("--------------------------------------------");
-            if (cut > 0) {
-                int prev = all.lastIndexOf("--------------------------------------------", cut - 1);
-                if (prev >= 0) all = all.substring(prev + 45);
-            }
-            return all.trim();
+            return new String(b, 0, n, "UTF-8").trim();
         } catch (Throwable t) {
             return "";
         }
     }
 
-    public static void clear(Context ctx) {
+    public static synchronized void clear(Context ctx) {
         try {
             File f = logFile != null ? logFile : new File(ctx.getFilesDir(), "panel-log.txt");
             if (f.exists()) f.delete();

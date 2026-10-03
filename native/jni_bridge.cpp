@@ -135,6 +135,8 @@ static void engineMain() {
     UCI::loop(1, nullptr);      // reads commands from std::cin (our queue)
 
     Threads.set(0);
+    g_started = false;
+    if (g_vm) g_vm->DetachCurrentThread();
     LOGI("stockfish: uci loop finished");
 }
 
@@ -147,11 +149,15 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
 
 JNIEXPORT void JNICALL
 Java_com_chesshint_panel_UciEngine_nativeInit(JNIEnv* env, jobject thiz) {
-    if (g_started) return;
-    g_started = true;
-    if (!g_obj) g_obj = env->NewGlobalRef(thiz);
+    if (g_obj) {
+        env->DeleteGlobalRef(g_obj);
+        g_obj = nullptr;
+    }
+    g_obj = env->NewGlobalRef(thiz);
     jclass cls = env->GetObjectClass(thiz);
     g_midLine = env->GetMethodID(cls, "onEngineLine", "(Ljava/lang/String;)V");
+    if (g_started) return;
+    g_started = true;
     std::thread t(engineMain);
     t.detach();
 }
