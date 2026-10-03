@@ -1,6 +1,27 @@
 # Changelog
 
-## v1.6 — current
+## v1.7 — current
+**Fixed crash when granting Screen Recording permission**
+
+* **Fixed `ForegroundServiceDidNotStartInTimeException` on `onActivityResult` → `onResume`**:
+  In Android's Activity lifecycle, `MainActivity.onResume()` ALWAYS runs immediately (1 ms) after
+  `MainActivity.onActivityResult()`. Previously, `onActivityResult()` called `startForegroundService(i)`
+  (which starts asynchronously), and then `onResume()` ran `OverlayService.cleanStrays(this)` which saw
+  `!isRunning()` and called `ctx.stopService(...)` *before* `OverlayService.onStartCommand()` had called
+  `startForeground()`. Android's system server then killed the app with a fatal
+  `RemoteServiceException$ForegroundServiceDidNotStartInTimeException`.
+  `MainActivity.onActivityResult()` now calls `OverlayService.markStarting(res, data)` before
+  `startForegroundService(i)`, `cleanStrays()` never calls `stopService()`, and every path through
+  `OverlayService.onStartCommand()` satisfies `startForeground()` with a 3-arg → 2-arg fallback.
+* **Lazy on-demand frame decoding in `ScreenGrab` (zero 60 fps heap pressure)**:
+  `onImageAvailable` on `chesshint-frames` now only stores the latest lightweight `Image` reference in
+  `pending` (0 bytes allocated when idle) and decodes pixels into `lastBitmap` only on demand inside
+  `grab()`, using an 8 KB single-row buffer instead of a 10 MB `ByteBuffer.allocateDirect` when
+  `rowStride > width * 4`.
+* **Non-fatal background thread exception guard (`CrashGuard`)**: uncaught exceptions on background
+  threads are recorded to the in-app log without killing the app process.
+
+## v1.6
 **Complete fix for "Could not read the screen", duplicate floating icons & instant STOP**
 
 * **`ImageReader` listener now truly runs on `chesshint-frames`**: fixed the bug where

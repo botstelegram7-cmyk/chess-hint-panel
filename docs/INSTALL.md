@@ -1,7 +1,7 @@
 # Install & first run
 
 ## 1. Install the APK
-1. Copy `apk/ChessHintPanel-v1.2.apk` to the phone (or open the link in the browser).
+1. Copy `apk/ChessHintPanel-v1.7.apk` to the phone (or open the link in the browser).
 2. Tap the file. Android will warn about installing from an unknown source —
    choose **Settings → Allow from this source**, then **Install**.
 

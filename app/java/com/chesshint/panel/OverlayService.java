@@ -36,14 +36,13 @@ import java.util.Locale;
 /**
  * Everything happens here: floating windows, screen reading, game tracking and the engine.
  *
- * Key lifecycle & capture guarantees (v1.6):
- *  - Every floating View added to WindowManager is registered in LIVE_VIEWS so orphan/duplicate
- *    bubbles can never accumulate across restarts or retries.
- *  - MediaProjection.Callback is unregistered BEFORE projection.stop() and guarded by `destroyed`,
- *    preventing onDestroy()/retry from respawning a zombie floating icon after STOP.
- *  - ScreenGrab uses its own frameHandler() thread for ImageReader and OverlayView nudges a 1x1
- *    pixel while hiding existing marks during capture so static boards and previous arrows never
- *    break board reading.
+ * Key lifecycle & capture guarantees (v1.7):
+ *  - markStarting() prevents MainActivity.onResume() (which runs 1ms after onActivityResult())
+ *    from thinking the service is stopped and calling stopService() before startForeground() runs.
+ *  - Every path through onStartCommand() satisfies startForeground() so Android 8-15 never throws
+ *    ForegroundServiceDidNotStartInTimeException.
+ *  - ScreenGrab keeps only a lightweight Image reference in its 60fps listener and decodes on
+ *    demand inside grab(), avoiding heap exhaustion right after granting screen capture.
  */
 public class OverlayService extends Service implements
         BubbleView.Listener, PanelView.Listener, CalibrationView.Listener, BoardEditorView.Listener {
@@ -55,6 +54,26 @@ public class OverlayService extends Service implements
     private static final int NOTIF_ID = 42;
 
     private static volatile OverlayService INSTANCE;
+
+    private static volatile long startingAt = 0;
+    private static volatile int pendingCode = 0;
+    private static volatile Intent pendingData = null;
+
+    public static void markStarting(int code, Intent data) {
+        startingAt = System.currentTimeMillis();
+        pendingCode = code;
+        pendingData = data;
+    }
+
+    public static void clearStarting() {
+        startingAt = 0;
+        pendingCode = 0;
+        pendingData = null;
+    }
+
+    public static boolean isStarting() {
+        return System.currentTimeMillis() - startingAt < 6000;
+    }
 
     private static final ArrayList<View> LIVE_VIEWS = new ArrayList<>();
     private static WindowManager LIVE_WM;
@@ -155,6 +174,7 @@ public class OverlayService extends Service implements
     @Override
     public void onCreate() {
         super.onCreate();
+        CrashGuard.install(this);
         if (INSTANCE != null && INSTANCE != this) {
             try { INSTANCE.shutdown(null); } catch (Throwable ignored) { }
         }
@@ -191,6 +211,7 @@ public class OverlayService extends Service implements
     public int onStartCommand(Intent intent, int flags, int startId) {
         try {
             if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+                goForegroundPlain("Stopping…");
                 shutdown("Panel closed");
                 return START_NOT_STICKY;
             }
@@ -198,16 +219,31 @@ public class OverlayService extends Service implements
                 destroyed = false;
                 INSTANCE = this;
             }
+
+            int code = pendingCode;
+            Intent data = pendingData;
             if (intent != null && intent.hasExtra(EXTRA_DATA)) {
-                ensureWindows();
-                startProjection(intent);
+                code = intent.getIntExtra(EXTRA_CODE, code);
+                try {
+                    Intent d = intent.getParcelableExtra(EXTRA_DATA);
+                    if (d != null) data = d;
+                } catch (Throwable ignored) { }
+            }
+            clearStarting();
+
+            if (data != null) {
+                startProjection(code, data);
+                main.postDelayed(this::ensureWindows, 120);
             } else if (projection == null) {
+                goForegroundPlain("Stopping…");
                 shutdown(null);
                 return START_NOT_STICKY;
             } else {
-                ensureWindows();
+                main.postDelayed(this::ensureWindows, 120);
             }
         } catch (Throwable t) {
+            CrashGuard.record(this, "onStartCommand", t);
+            goForegroundPlain("Panel error");
             toast("Panel error: " + t.getClass().getSimpleName());
             shutdown(null);
         }
@@ -217,6 +253,7 @@ public class OverlayService extends Service implements
     @Override
     public void onDestroy() {
         destroyed = true;
+        clearStarting();
         try { stopAuto(); } catch (Throwable ignored) { }
         try { main.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
         try { if (worker != null) worker.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
@@ -260,10 +297,12 @@ public class OverlayService extends Service implements
     // ==================================================================== setup
 
     private void createChannel() {
-        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        NotificationChannel ch = new NotificationChannel(CHANNEL, "Chess Hint Panel", NotificationManager.IMPORTANCE_LOW);
-        ch.setShowBadge(false);
-        nm.createNotificationChannel(ch);
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            NotificationChannel ch = new NotificationChannel(CHANNEL, "Chess Hint Panel", NotificationManager.IMPORTANCE_LOW);
+            ch.setShowBadge(false);
+            nm.createNotificationChannel(ch);
+        } catch (Throwable ignored) { }
     }
 
     private Notification buildNotification(String text) {
@@ -276,9 +315,9 @@ public class OverlayService extends Service implements
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat)
                 .setContentTitle("Chess Hint Panel")
-                .setContentText(text)
+                .setContentText(text == null ? "Running" : text)
                 .setContentIntent(open)
-                .addAction(new Notification.Action.Builder(null, "STOP", stop).build())
+                .addAction(new Notification.Action.Builder(R.drawable.ic_stat, "STOP", stop).build())
                 .setOngoing(true)
                 .build();
     }
@@ -291,10 +330,9 @@ public class OverlayService extends Service implements
         } catch (Throwable ignored) { }
     }
 
-    private void startProjection(Intent intent) {
-        int code = intent.getIntExtra(EXTRA_CODE, 0);
-        Intent data = intent.getParcelableExtra(EXTRA_DATA);
+    private void startProjection(int code, Intent data) {
         if (data == null) {
+            goForegroundPlain("Waiting for screen reading…");
             captureProblem("Screen reading data was empty — please try again");
             return;
         }
@@ -303,11 +341,8 @@ public class OverlayService extends Service implements
         releaseCaptureOnly();
         lastProblem = "";
 
-        boolean foregroundFirst = Build.VERSION.SDK_INT >= 29;
-        boolean foregroundDone = false;
-        if (foregroundFirst) {
-            foregroundDone = goForeground("Starting screen reading…");
-        }
+        // Start foreground service FIRST on all API levels (with MEDIA_PROJECTION type on API 29+)
+        boolean foregroundDone = goForeground("Starting screen reading…");
 
         String firstError = "";
         try {
@@ -320,10 +355,6 @@ public class OverlayService extends Service implements
         }
 
         if (projection == null) {
-            if (foregroundDone) {
-                try { stopForeground(true); } catch (Throwable ignored) { }
-                foregroundDone = false;
-            }
             try {
                 MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
                 projection = mpm.getMediaProjection(code, data);
@@ -331,18 +362,19 @@ public class OverlayService extends Service implements
                     foregroundDone = goForeground("Starting screen reading…");
                 }
             } catch (Throwable t) {
-                CrashGuard.record(this, "getMediaProjection (projection first)", t);
+                CrashGuard.record(this, "getMediaProjection (fallback)", t);
+                if (!foregroundDone) goForegroundPlain("Screen reading problem");
                 captureProblem("Screen reading refused: " + describe(t)
                         + (firstError.isEmpty() ? "" : " / " + firstError));
                 return;
             }
         }
+        if (!foregroundDone) {
+            goForegroundPlain("Ready — tap the ♞ button");
+        }
         if (projection == null) {
             captureProblem("Screen reading permission was not granted");
             return;
-        }
-        if (!foregroundDone) {
-            goForeground("Ready — tap the ♞ button");
         }
 
         final MediaProjection p = projection;
@@ -378,7 +410,7 @@ public class OverlayService extends Service implements
                     return;
                 }
                 grab = g;
-                Bitmap first = g.grabWait(4000, nudge);
+                Bitmap first = g.grabWait(4500, nudge);
                 if (first == null) {
                     final String err = g.lastError();
                     postSafe(() -> {
@@ -433,7 +465,17 @@ public class OverlayService extends Service implements
             }
             return true;
         } catch (Throwable t) {
-            CrashGuard.record(this, "startForeground", t);
+            CrashGuard.record(this, "startForeground(mediaProjection)", t);
+            return goForegroundPlain(text);
+        }
+    }
+
+    private boolean goForegroundPlain(String text) {
+        try {
+            startForeground(NOTIF_ID, buildNotification(text));
+            return true;
+        } catch (Throwable t) {
+            CrashGuard.record(this, "startForeground(plain)", t);
             return false;
         }
     }
@@ -463,6 +505,7 @@ public class OverlayService extends Service implements
             if (bubble == null) addBubble();
             if (panel != null) panel.refresh(prefs, configLine());
         } catch (Throwable t) {
+            CrashGuard.record(this, "ensureWindows", t);
             toast("Could not show the panel: " + t.getMessage());
             shutdown(null);
         }
@@ -564,6 +607,7 @@ public class OverlayService extends Service implements
     /** One-tap close: marks + floating ♞ + panels disappear, notifications are dropped, service ends. */
     private void shutdown(String note) {
         destroyed = true;
+        clearStarting();
         try { stopAuto(); } catch (Throwable ignored) { }
         try { main.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
         try { if (worker != null) worker.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
@@ -1239,6 +1283,7 @@ public class OverlayService extends Service implements
 
     /** STOP from the app, the notification or the ♞ button: everything the app draws goes away immediately. */
     public static void stopEverything(Context ctx) {
+        clearStarting();
         final OverlayService s = INSTANCE;
         if (Looper.myLooper() == Looper.getMainLooper()) {
             if (s != null) {
@@ -1298,23 +1343,26 @@ public class OverlayService extends Service implements
         MAIN.post(() -> { try { s.onHideBubble(); } catch (Throwable ignored) { } });
     }
 
-    /** Sweeps away any ♞ / panel / marks that survived an earlier session and collapses open menus when app opens. */
+    /**
+     * Sweeps away stray windows when the app opens, but NEVER calls stopService() during
+     * Activity.onResume() (which runs 1ms after onActivityResult() and used to kill the newly
+     * started foreground service with ForegroundServiceDidNotStartInTimeException!).
+     */
     public static void cleanStrays(Context ctx) {
-        if (!isRunning()) {
-            purgeAllWindows();
-            if (ctx != null) {
-                try { ctx.stopService(new Intent(ctx, OverlayService.class)); } catch (Throwable ignored) { }
+        if (isRunning() || isStarting()) {
+            if (isRunning()) {
+                MAIN.post(() -> {
+                    OverlayService s = INSTANCE;
+                    if (s != null && !s.destroyed) {
+                        s.hidePanel();
+                        s.hideCalibration();
+                        s.hideEditor();
+                    }
+                });
             }
             return;
         }
-        MAIN.post(() -> {
-            OverlayService s = INSTANCE;
-            if (s != null && !s.destroyed) {
-                s.hidePanel();
-                s.hideCalibration();
-                s.hideEditor();
-            }
-        });
+        purgeAllWindows();
     }
 
     public static void settingsChanged() {

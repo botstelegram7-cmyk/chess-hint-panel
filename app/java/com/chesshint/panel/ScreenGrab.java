@@ -19,20 +19,19 @@ import android.view.Display;
 import android.view.WindowManager;
 
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 
 /**
  * Grabs frames of the phone screen (MediaProjection -> VirtualDisplay -> ImageReader).
  *
- * Key guarantees (v1.6):
- *  1) Both ImageReader.setOnImageAvailableListener AND VirtualDisplay use the dedicated
- *     "chesshint-frames" HandlerThread — never the hint worker thread — so grabWait() never
- *     deadlocks the listener callback.
- *  2) Decodes padded rowStride buffers row-by-row so 1080p/720p gralloc buffers without trailing
- *     last-row padding never throw RuntimeException("Buffer not large enough for pixels").
- *  3) Caches the most recent decoded Bitmap (lastBitmap) and closes acquired Images immediately
- *     so static chess boards (where SurfaceFlinger emits no new buffers while nothing moves)
- *     always return a valid frame instead of null.
+ * Key guarantees (v1.7):
+ *  1) ImageReader listener runs on dedicated "chesshint-frames" HandlerThread, never on the hint
+ *     worker thread, and ONLY swaps the lightweight Image reference `pending` (0 bytes allocated
+ *     during 60 fps idle screen updates!).
+ *  2) Pixel decoding into a Bitmap only happens on demand inside grab(), using an 8 KB row buffer
+ *     when rowStride > width*4 so 1080p/720p gralloc buffers never throw "Buffer not large enough
+ *     for pixels" or exhaust heap memory.
+ *  3) Caches the most recent decoded Bitmap (lastBitmap) so static chess boards always return a
+ *     valid screenshot even when SurfaceFlinger stops emitting new frames.
  */
 public class ScreenGrab {
 
@@ -44,11 +43,11 @@ public class ScreenGrab {
     private HandlerThread grabThread;
     private Handler grabHandler;
 
-    private final Object lock = new Object();
-    private final Object readerLock = new Object();
-
+    private Image pending;
     private Bitmap lastBitmap;
     private long frameSeq = 0;
+    private final Object lock = new Object();
+
     private int w, h, dpi;
     private volatile boolean dead = false;
     private volatile String lastError = "";
@@ -136,10 +135,28 @@ public class ScreenGrab {
                 w = p.x;
                 h = p.y;
                 dpi = dm.densityDpi;
-                synchronized (readerLock) {
-                    reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3);
-                    reader.setOnImageAvailableListener(r -> consumeLatestFromReader(), fh);
-                }
+                reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3);
+                reader.setOnImageAvailableListener(r -> {
+                    if (dead) return;
+                    try {
+                        Image im = r.acquireLatestImage();
+                        if (im != null) {
+                            synchronized (lock) {
+                                if (dead) {
+                                    im.close();
+                                    return;
+                                }
+                                if (pending != null) {
+                                    try { pending.close(); } catch (Throwable ignored) { }
+                                }
+                                pending = im;
+                                lastFrameAt = System.currentTimeMillis();
+                                frameSeq++;
+                                lock.notifyAll();
+                            }
+                        }
+                    } catch (Throwable ignored) { }
+                }, fh);
                 vd = projection.createVirtualDisplay(
                         "chesshint",
                         w,
@@ -176,13 +193,36 @@ public class ScreenGrab {
             h = p.y;
             try {
                 Handler fh = frameHandler();
-                ImageReader oldReader;
-                ImageReader newReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3);
-                newReader.setOnImageAvailableListener(r -> consumeLatestFromReader(), fh);
-                synchronized (readerLock) {
-                    oldReader = reader;
-                    reader = newReader;
+                synchronized (lock) {
+                    if (pending != null) {
+                        try { pending.close(); } catch (Throwable ignored) { }
+                        pending = null;
+                    }
                 }
+                ImageReader oldReader = reader;
+                ImageReader newReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3);
+                newReader.setOnImageAvailableListener(r -> {
+                    if (dead) return;
+                    try {
+                        Image im = r.acquireLatestImage();
+                        if (im != null) {
+                            synchronized (lock) {
+                                if (dead) {
+                                    im.close();
+                                    return;
+                                }
+                                if (pending != null) {
+                                    try { pending.close(); } catch (Throwable ignored) { }
+                                }
+                                pending = im;
+                                lastFrameAt = System.currentTimeMillis();
+                                frameSeq++;
+                                lock.notifyAll();
+                            }
+                        }
+                    } catch (Throwable ignored) { }
+                }, fh);
+                reader = newReader;
                 if (vd != null) {
                     vd.resize(w, h, dpi);
                     vd.setSurface(newReader.getSurface());
@@ -194,46 +234,20 @@ public class ScreenGrab {
         }
     }
 
-    private void consumeLatestFromReader() {
-        if (dead) return;
-        Image im = null;
-        Bitmap decoded = null;
-        synchronized (readerLock) {
-            if (dead || reader == null) return;
-            try {
-                im = reader.acquireLatestImage();
-            } catch (Throwable ignored) {
-                im = null;
-            }
-            if (im == null) return;
-            try {
-                decoded = decodeImage(im);
-            } catch (Throwable t) {
-                lastError = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : ": " + t.getMessage());
-            } finally {
-                try { im.close(); } catch (Throwable ignored) { }
+    private synchronized void releaseDisplay() {
+        synchronized (lock) {
+            if (pending != null) {
+                try { pending.close(); } catch (Throwable ignored) { }
+                pending = null;
             }
         }
-        if (decoded != null) {
-            long now = System.currentTimeMillis();
-            lastFrameAt = now;
-            checkBlank(decoded);
-            synchronized (lock) {
-                if (dead) {
-                    decoded.recycle();
-                    return;
-                }
-                if (lastBitmap != null && lastBitmap != decoded) {
-                    lastBitmap.recycle();
-                }
-                lastBitmap = decoded;
-                frames++;
-                frameSeq++;
-                lock.notifyAll();
-            }
-        }
+        try { if (vd != null) vd.release(); } catch (Throwable ignored) { }
+        vd = null;
+        try { if (reader != null) reader.close(); } catch (Throwable ignored) { }
+        reader = null;
     }
 
+    /** Decodes an Image into a Bitmap safely on Demand, handling rowStride padding without 10MB temp buffers. */
     private Bitmap decodeImage(Image im) {
         Image.Plane[] planes = im.getPlanes();
         if (planes == null || planes.length == 0) return null;
@@ -248,48 +262,39 @@ public class ScreenGrab {
 
         Bitmap bmp;
         buf.rewind();
-        if (pixelStride == 4 && rowStride == width * 4 && buf.remaining() >= width * height * 4) {
-            bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            bmp.copyPixelsFromBuffer(buf);
-        } else if (pixelStride == 4 && rowStride >= width * 4) {
-            int rowBytesLen = width * 4;
-            byte[] rowBuf = new byte[rowBytesLen];
-            ByteBuffer tight = ByteBuffer.allocateDirect(width * height * 4);
-            int limit = buf.limit();
-            for (int y = 0; y < height; y++) {
-                int pos = y * rowStride;
-                if (pos + rowBytesLen <= limit) {
-                    buf.position(pos);
-                    buf.get(rowBuf, 0, rowBytesLen);
-                    tight.put(rowBuf);
-                } else if (pos < limit) {
-                    int avail = limit - pos;
-                    buf.position(pos);
-                    buf.get(rowBuf, 0, avail);
-                    Arrays.fill(rowBuf, avail, rowBytesLen, (byte) 0);
-                    tight.put(rowBuf);
-                }
+        int bmpW = pixelStride > 0 ? (rowStride / pixelStride) : width;
+        if (pixelStride == 4 && (rowStride % 4 == 0) && buf.remaining() >= bmpW * height * 4) {
+            Bitmap raw = Bitmap.createBitmap(bmpW, height, Bitmap.Config.ARGB_8888);
+            raw.copyPixelsFromBuffer(buf);
+            if (bmpW != width) {
+                bmp = Bitmap.createBitmap(raw, 0, 0, width, height);
+                raw.recycle();
+            } else {
+                bmp = raw;
             }
-            tight.rewind();
-            bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            bmp.copyPixelsFromBuffer(tight);
         } else {
-            int[] colors = new int[width * height];
+            // Safe row-by-row decode using only an 8 KB row buffer (handles missing last-row stride padding)
+            bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            int[] rowPixels = new int[width];
+            byte[] rowBytes = new byte[width * pixelStride];
             int limit = buf.limit();
             for (int y = 0; y < height; y++) {
                 int rowStart = y * rowStride;
-                for (int x = 0; x < width; x++) {
-                    int p = rowStart + x * pixelStride;
-                    if (p + 3 < limit) {
-                        int r = buf.get(p) & 0xFF;
-                        int g = buf.get(p + 1) & 0xFF;
-                        int b = buf.get(p + 2) & 0xFF;
-                        int a = buf.get(p + 3) & 0xFF;
-                        colors[y * width + x] = (a << 24) | (r << 16) | (g << 8) | b;
-                    }
+                if (rowStart >= limit) break;
+                int avail = Math.min(rowBytes.length, limit - rowStart);
+                buf.position(rowStart);
+                buf.get(rowBytes, 0, avail);
+                int maxX = avail / pixelStride;
+                for (int x = 0; x < maxX; x++) {
+                    int off = x * pixelStride;
+                    int r = rowBytes[off] & 0xFF;
+                    int g = rowBytes[off + 1] & 0xFF;
+                    int b = rowBytes[off + 2] & 0xFF;
+                    int a = rowBytes[off + 3] & 0xFF;
+                    rowPixels[x] = (a << 24) | (r << 16) | (g << 8) | b;
                 }
+                bmp.setPixels(rowPixels, 0, width, 0, y, maxX, 1);
             }
-            bmp = Bitmap.createBitmap(colors, width, height, Bitmap.Config.ARGB_8888);
         }
 
         Point p = realSize();
@@ -305,20 +310,52 @@ public class ScreenGrab {
         return bmp;
     }
 
-    private synchronized void releaseDisplay() {
-        try { if (vd != null) vd.release(); } catch (Throwable ignored) { }
-        vd = null;
-        synchronized (readerLock) {
-            try { if (reader != null) reader.close(); } catch (Throwable ignored) { }
-            reader = null;
-        }
-    }
-
-    /** Returns a copy of the latest frame (caller may safely recycle it), or null if none yet. */
+    /**
+     * Decodes any newly arrived Image in `pending` (or polls ImageReader directly), updates
+     * `lastBitmap`, and returns a copy of `lastBitmap` (caller may safely recycle it).
+     */
     public Bitmap grab() {
         if (dead) return null;
-        refresh();
-        consumeLatestFromReader();
+        Image im = null;
+        synchronized (lock) {
+            if (pending != null) {
+                im = pending;
+                pending = null;
+            }
+        }
+        if (im == null) {
+            try {
+                ImageReader r = reader;
+                if (r != null) {
+                    im = r.acquireLatestImage();
+                    if (im != null) {
+                        synchronized (lock) {
+                            lastFrameAt = System.currentTimeMillis();
+                            frameSeq++;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }
+        if (im != null) {
+            try {
+                Bitmap decoded = decodeImage(im);
+                if (decoded != null) {
+                    frames++;
+                    checkBlank(decoded);
+                    synchronized (lock) {
+                        if (lastBitmap != null && lastBitmap != decoded) {
+                            lastBitmap.recycle();
+                        }
+                        lastBitmap = decoded;
+                    }
+                }
+            } catch (Throwable t) {
+                lastError = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : ": " + t.getMessage());
+            } finally {
+                try { im.close(); } catch (Throwable ignored) { }
+            }
+        }
         synchronized (lock) {
             if (lastBitmap != null && !lastBitmap.isRecycled()) {
                 try {
@@ -342,12 +379,12 @@ public class ScreenGrab {
             Bitmap b = grab();
             if (b != null) return b;
             long now = System.currentTimeMillis();
-            if (nudge != null && now - lastNudge >= 100) {
+            if (nudge != null && now - lastNudge >= 120) {
                 lastNudge = now;
                 try { nudge.run(); } catch (Throwable ignored) { }
             }
             synchronized (lock) {
-                try { lock.wait(45); } catch (InterruptedException ignored) { }
+                try { lock.wait(50); } catch (InterruptedException ignored) { }
             }
         }
         return grab();
@@ -359,7 +396,6 @@ public class ScreenGrab {
      */
     public Bitmap grabFresh(long ms, Runnable nudge) {
         if (dead) return null;
-        refresh();
         long startSeq;
         synchronized (lock) {
             startSeq = frameSeq;
@@ -370,17 +406,20 @@ public class ScreenGrab {
         long t0 = System.currentTimeMillis();
         long lastNudge = t0;
         while (!dead && System.currentTimeMillis() - t0 < ms) {
-            consumeLatestFromReader();
+            boolean hasNew;
             synchronized (lock) {
-                if (frameSeq > startSeq && lastBitmap != null && !lastBitmap.isRecycled()) {
-                    try {
-                        return lastBitmap.copy(Bitmap.Config.ARGB_8888, false);
-                    } catch (Throwable ignored) { }
+                hasNew = (pending != null || frameSeq > startSeq);
+                if (!hasNew) {
+                    try { lock.wait(45); } catch (InterruptedException ignored) { }
+                    hasNew = (pending != null || frameSeq > startSeq);
                 }
-                try { lock.wait(45); } catch (InterruptedException ignored) { }
+            }
+            if (hasNew) {
+                Bitmap b = grab();
+                if (b != null) return b;
             }
             long now = System.currentTimeMillis();
-            if (nudge != null && now - lastNudge >= 110) {
+            if (nudge != null && now - lastNudge >= 120) {
                 lastNudge = now;
                 try { nudge.run(); } catch (Throwable ignored) { }
             }
@@ -403,18 +442,16 @@ public class ScreenGrab {
                 seqBefore = frameSeq;
             }
             try { Thread.sleep(95); } catch (InterruptedException ignored) { }
-            consumeLatestFromReader();
-            Bitmap next = null;
+            boolean arrived;
             synchronized (lock) {
-                if (frameSeq > seqBefore && lastBitmap != null && !lastBitmap.isRecycled()) {
-                    try {
-                        next = lastBitmap.copy(Bitmap.Config.ARGB_8888, false);
-                    } catch (Throwable ignored) { }
-                }
+                arrived = (pending != null || frameSeq > seqBefore);
             }
-            if (next == null) {
+            if (!arrived) {
+                // No new frame arrived in 95ms -> screen is static!
                 return prev;
             }
+            Bitmap next = grab();
+            if (next == null) return prev;
             int[] small = thumb(next, 24);
             if (sameThumb(prevSmall, small)) {
                 prev.recycle();

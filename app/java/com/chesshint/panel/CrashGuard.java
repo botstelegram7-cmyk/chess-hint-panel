@@ -2,6 +2,7 @@ package com.chesshint.panel;
 
 import android.content.Context;
 import android.os.Build;
+import android.os.Looper;
 
 import java.io.File;
 import java.io.PrintWriter;
@@ -21,14 +22,20 @@ public class CrashGuard {
 
     private static File logFile;
     private static volatile String lastMessage = "";
+    private static volatile boolean installed = false;
 
-    public static void install(Context ctx) {
+    public static synchronized void install(Context ctx) {
+        if (installed || ctx == null) return;
+        installed = true;
         final Context app = ctx.getApplicationContext();
         logFile = new File(app.getFilesDir(), "panel-log.txt");
         final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
             record(app, "UNCAUGHT in " + t.getName(), e);
-            if (previous != null) previous.uncaughtException(t, e);
+            // Never let a background thread exception terminate the app process
+            if (t == Looper.getMainLooper().getThread() && previous != null) {
+                previous.uncaughtException(t, e);
+            }
         });
     }
 
@@ -67,7 +74,6 @@ public class CrashGuard {
             sw.append("--------------------------------------------\n");
             lastMessage = sw.toString();
             File f = logFile != null ? logFile : new File(ctx.getFilesDir(), "panel-log.txt");
-            // keep the log small: only the newest 24 KB
             if (f.length() > 24000) f.delete();
             java.io.FileOutputStream out = new java.io.FileOutputStream(f, true);
             out.write(lastMessage.getBytes("UTF-8"));
@@ -87,7 +93,6 @@ public class CrashGuard {
             in.close();
             if (n <= 0) return "";
             String all = new String(b, 0, n, "UTF-8");
-            // only the last entry
             int cut = all.lastIndexOf("--------------------------------------------");
             if (cut > 0) {
                 int prev = all.lastIndexOf("--------------------------------------------", cut - 1);

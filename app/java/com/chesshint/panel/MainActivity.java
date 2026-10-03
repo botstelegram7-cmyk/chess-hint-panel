@@ -7,6 +7,8 @@ import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.View;
 import android.view.ViewGroup;
@@ -71,7 +73,7 @@ public class MainActivity extends Activity {
         bar.addView(icon);
         LinearLayout titles = Ui.column(this);
         titles.addView(Ui.text(this, "Chess Hint Panel", 15.5f, Ui.TEXT, true));
-        titles.addView(Ui.text(this, "v1.6  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
+        titles.addView(Ui.text(this, "v1.7  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
         bar.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView gear = Ui.text(this, "\u2699", 22f, Ui.TEXT, false);
         gear.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 4), 0);
@@ -202,7 +204,7 @@ public class MainActivity extends Activity {
         dr4.addView(Ui.primaryButton(this, "TEST SCREEN READING", Ui.ACCENT2, 0xFF06121F, v -> {
             OverlayService.selfTest();
             toast("Testing one picture...");
-            new android.os.Handler().postDelayed(this::refresh, 1200);
+            new Handler(Looper.getMainLooper()).postDelayed(this::refresh, 1200);
         }), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         diag.addView(dr4, Ui.lpTop(this, 0, 8));
         root.addView(diag, Ui.lpTop(this, 0, 12));
@@ -248,7 +250,7 @@ public class MainActivity extends Activity {
     private boolean starting;
 
     private void onAction() {
-        if (starting) { toast("Already starting..."); return; }
+        if (starting || OverlayService.isStarting()) { toast("Already starting..."); return; }
         if (OverlayService.isRunning()) {
             OverlayService.stopEverything(this);
             refresh();
@@ -259,7 +261,7 @@ public class MainActivity extends Activity {
     }
 
     private void retryScreenReading() {
-        if (starting) { toast("Already starting..."); return; }
+        if (starting || OverlayService.isStarting()) { toast("Already starting..."); return; }
         problemDismissed = false;
         OverlayService.retryCapture();
         requestScreenCapture();
@@ -303,6 +305,9 @@ public class MainActivity extends Activity {
         starting = false;
         if (res == RESULT_OK && data != null) {
             problemDismissed = false;
+            // Mark starting BEFORE startForegroundService so onResume() (which runs 1ms later)
+            // never calls stopService() and causes ForegroundServiceDidNotStartInTimeException!
+            OverlayService.markStarting(res, data);
             Intent i = new Intent(this, OverlayService.class);
             i.putExtra(OverlayService.EXTRA_CODE, res);
             i.putExtra(OverlayService.EXTRA_DATA, data);
@@ -312,10 +317,21 @@ public class MainActivity extends Activity {
                 captureGranted = true;
                 toast("Starting panel…");
             } catch (Throwable t) {
-                toast("Could not start the panel: " + t.getMessage());
+                try {
+                    startService(i);
+                    captureGranted = true;
+                    toast("Starting panel…");
+                } catch (Throwable t2) {
+                    OverlayService.clearStarting();
+                    CrashGuard.record(this, "startForegroundService", t2);
+                    toast("Could not start the panel: " + t2.getMessage());
+                }
             }
-            new android.os.Handler().postDelayed(this::refresh, 700);
+            Handler h = new Handler(Looper.getMainLooper());
+            h.postDelayed(this::refresh, 500);
+            h.postDelayed(this::refresh, 1500);
         } else {
+            OverlayService.clearStarting();
             toast("Screen reading was cancelled");
             refresh();
         }
@@ -323,8 +339,9 @@ public class MainActivity extends Activity {
 
     private void refresh() {
         boolean overlay = Settings.canDrawOverlays(this);
+        boolean isStarting = OverlayService.isStarting();
         boolean running = OverlayService.isRunning();
-        captureGranted = running && OverlayService.hasCapture();
+        captureGranted = (running && OverlayService.hasCapture()) || isStarting;
 
         TextView om = (TextView) overlayRow.getTag();
         om.setText(overlay ? "\u2714" : "\u2716");
@@ -333,18 +350,18 @@ public class MainActivity extends Activity {
         cm.setText(captureGranted ? "\u2714" : "\u2716");
         cm.setTextColor(captureGranted ? Ui.ACCENT : Ui.DANGER);
 
-        statusDot.setTextColor(running ? Ui.ACCENT : Ui.DANGER);
-        statusText.setText(running ? "Panel is running" : "Panel is stopped");
+        statusDot.setTextColor((running || isStarting) ? Ui.ACCENT : Ui.DANGER);
+        statusText.setText(running ? "Panel is running" : (isStarting ? "Starting panel…" : "Panel is stopped"));
         int frames = OverlayService.framesSeen();
         statusSub.setText(running
                 ? (OverlayService.hasCapture()
                     ? (frames > 0 ? ("screen reading OK (" + frames + " pictures) — tap the ♞ bubble")
                                   : "waiting for the first picture…")
                     : "waiting for screen reading…")
-                : "allow both permissions, then press START PANEL");
-        actionBtn.setText(running ? "STOP PANEL" : "START PANEL");
-        actionBtn.setBackground(Ui.round(running ? 0xFF2A1620 : Ui.ACCENT, 0, this, 14));
-        actionBtn.setTextColor(running ? 0xFFFF7B8A : 0xFF06210F);
+                : (isStarting ? "starting screen reading…" : "allow both permissions, then press START PANEL"));
+        actionBtn.setText((running || isStarting) ? "STOP PANEL" : "START PANEL");
+        actionBtn.setBackground(Ui.round((running || isStarting) ? 0xFF2A1620 : Ui.ACCENT, 0, this, 14));
+        actionBtn.setTextColor((running || isStarting) ? 0xFFFF7B8A : 0xFF06210F);
 
         if (diagText != null) {
             String info = OverlayService.diagnostics();
@@ -376,7 +393,7 @@ public class MainActivity extends Activity {
     private void shareLog() {
         try {
             StringBuilder sb = new StringBuilder();
-            sb.append("Chess Hint Panel ").append("1.6").append("\n");
+            sb.append("Chess Hint Panel ").append("1.7").append("\n");
             sb.append("android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (api ").append(android.os.Build.VERSION.SDK_INT).append(")\n");
             sb.append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL).append("\n\n");

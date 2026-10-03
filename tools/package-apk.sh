@@ -12,7 +12,7 @@ KS="${KEYSTORE:-$ROOT/build/keystore.jks}"
 PASS="${KEYSTORE_PASS:-chesshint}"
 OUT="$ROOT/build/out"
 LIBS="$ROOT/build/jnilibs"
-VER="${VERSION_NAME:-1.6}"
+VER="${VERSION_NAME:-1.7}"
 STAGE="$OUT/stage"
 [ -f "$OUT/dex/classes.dex" ] || { echo "run tools/build-apk.sh first"; exit 1; }
 [ -f "$LIBS/libstockfish.so.arm64-v8a" ] || { echo "run tools/build-stockfish-android.sh first"; exit 1; }
