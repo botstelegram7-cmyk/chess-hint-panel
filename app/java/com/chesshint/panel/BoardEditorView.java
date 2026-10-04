@@ -30,6 +30,7 @@ public class BoardEditorView extends View {
     public Board board = new Board();
     public boolean whiteBottom = true;
     private final RectF btnApply = new RectF(), btnClear = new RectF(), btnCancel = new RectF(), btnFlip = new RectF();
+    private final int[] screenLoc = new int[2];
     private long lastTap;
     private int lastIdx = -1;
 
@@ -70,6 +71,10 @@ public class BoardEditorView extends View {
         p.setColor(0xC0101018);
         c.drawRect(0, 0, W, H, p);
 
+        getLocationOnScreen(screenLoc);
+        c.save();
+        c.translate(-screenLoc[0], -screenLoc[1]);
+
         float s = rect.width() / 8f;
         p.setColor(0xFFFFFFFF);
         c.drawRect(rect, p);
@@ -93,10 +98,12 @@ public class BoardEditorView extends View {
 
         t.setTextSize(dp * 15);
         t.setColor(0xFFFFFFFF);
-        c.drawText("Tap a square to change the piece", W / 2f, rect.top - d(46), t);
+        c.drawText("Tap a square to change the piece", rect.centerX(), rect.top - d(46), t);
         t.setTextSize(dp * 12);
         t.setColor(0xFFB8CAD9);
-        c.drawText("\u25CF empty \u2192 \u2659 \u2658 \u2657 \u2656 \u2655 \u2654 (white) \u2192 \u265F \u265E \u265D \u265C \u265B \u265A (black) \u2192 \u25CB", W / 2f, rect.top - d(24), t);
+        c.drawText("\u25CF empty \u2192 \u2659 \u2658 \u2657 \u2656 \u2655 \u2654 (white) \u2192 \u265F \u265E \u265D \u265C \u265B \u265A (black) \u2192 \u25CB", rect.centerX(), rect.top - d(24), t);
+
+        c.restore();
 
         drawBtn(c, btnFlip, "BOTTOM = " + (whiteBottom ? "WHITE" : "BLACK"), 0xFF1B2C3E, 0xFF7FD4FF);
         drawBtn(c, btnCancel, "\u2715 CANCEL", 0xFF3A1620, 0xFFFF9AA5);
@@ -144,8 +151,10 @@ public class BoardEditorView extends View {
                 invalidate();
                 return true;
             }
+            getLocationOnScreen(screenLoc);
+            float sx = x + screenLoc[0], sy = y + screenLoc[1];
             float s = rect.width() / 8f;
-            int f = (int) ((x - rect.left) / s), r = (int) ((y - rect.top) / s);
+            int f = (int) ((sx - rect.left) / s), r = (int) ((sy - rect.top) / s);
             if (f >= 0 && f < 8 && r >= 0 && r < 8) {
                 int idx = r * 8 + f;
                 if (idx == lastIdx && System.currentTimeMillis() - lastTap < 700) return true;

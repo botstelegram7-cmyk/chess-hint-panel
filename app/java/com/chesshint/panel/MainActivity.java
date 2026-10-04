@@ -10,16 +10,18 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 /**
- * Home screen. Deliberately compact: a one line top bar, the two permissions, one big
- * START/STOP button and a few shortcuts. Everything else lives in Settings.
+ * Home screen. Compact top navigation bar (no app title clutter), permission status card,
+ * primary START/STOP action, quick board tools, and live diagnostics.
  */
 public class MainActivity extends Activity {
 
@@ -35,6 +37,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle b) {
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(b);
         CrashGuard.install(this);
         prefs = new Prefs(this);
@@ -63,23 +66,26 @@ public class MainActivity extends Activity {
         sv.setBackgroundColor(Ui.BG);
         LinearLayout root = Ui.column(this);
         int pad = Ui.dp(this, 14);
-        root.setPadding(pad, Ui.dp(this, 8), pad, Ui.dp(this, 26));
+        root.setPadding(pad, Ui.dp(this, 6), pad, Ui.dp(this, 24));
         sv.addView(root);
 
-        // ---- one line top bar (no wasted space)
+        // ---- compact top navigation bar (no application name, zero wasted space)
         LinearLayout bar = Ui.row(this);
-        TextView icon = Ui.text(this, "\u265E", 21f, Ui.ACCENT2, true);
-        icon.setPadding(0, 0, Ui.dp(this, 8), 0);
-        bar.addView(icon);
-        LinearLayout titles = Ui.column(this);
-        titles.addView(Ui.text(this, "Chess Hint Panel", 15.5f, Ui.TEXT, true));
-        titles.addView(Ui.text(this, "v2.0  •  Stockfish inside", 10.5f, Ui.TEXT_DIM, false));
-        bar.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView gear = Ui.text(this, "\u2699", 22f, Ui.TEXT, false);
-        gear.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 4), 0);
+        TextView engineBadge = Ui.text(this, "\u265E  Stockfish 11  •  v2.2", 12f, Ui.TEXT_DIM, true);
+        engineBadge.setBackground(Ui.round(Ui.CHIP, Ui.CARD_BORDER, this, 10));
+        engineBadge.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 6));
+        bar.addView(engineBadge);
+
+        View spacer = new View(this);
+        bar.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
+
+        TextView gear = Ui.text(this, "\u2699  Settings", 12.5f, Ui.TEXT, true);
+        gear.setGravity(Gravity.CENTER);
+        gear.setBackground(Ui.round(Ui.CHIP, Ui.CARD_BORDER, this, 10));
+        gear.setPadding(Ui.dp(this, 12), Ui.dp(this, 6), Ui.dp(this, 12), Ui.dp(this, 6));
         gear.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
         bar.addView(gear);
-        root.addView(bar, Ui.lpTop(this, 0, 6));
+        root.addView(bar, Ui.lpTop(this, 0, 2));
 
         // ---- status card
         LinearLayout card = Ui.card(this);
@@ -107,7 +113,7 @@ public class MainActivity extends Activity {
             else toast("Screen reading is active");
         });
 
-        root.addView(card, Ui.lpTop(this, 0, 12));
+        root.addView(card, Ui.lpTop(this, 0, 10));
 
         // ---- problem card (only visible when something went wrong)
         problemCard = Ui.card(this);
@@ -117,14 +123,15 @@ public class MainActivity extends Activity {
         problemText.setLineSpacing(Ui.dp(this, 3), 1f);
         problemCard.addView(problemText, Ui.lpTop(this, 0, 4));
         LinearLayout pr = Ui.row(this);
-        pr.addView(Ui.primaryButton(this, "RETRY SCREEN READING", 0xFFFF5C6C, 0xFF2A0810, v -> retryScreenReading()), weight());
+        pr.addView(Ui.primaryButton(this, "RETRY SCREEN READING", 0xFFFF5C6C, 0xFF2A0810, v -> retryScreenReading()),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         problemCard.addView(pr, Ui.lpTop(this, 0, 10));
         LinearLayout pr2 = Ui.row(this);
-        pr2.addView(Ui.ghostButton(this, "Share log", v -> shareLog()), weight());
+        pr2.addView(Ui.ghostButton(this, "Share log", v -> shareLog()), weightLeft());
         pr2.addView(Ui.ghostButton(this, "Dismiss", v -> {
             problemDismissed = true;
             refresh();
-        }), weight());
+        }), weightRight());
         problemCard.addView(pr2, Ui.lpTop(this, 0, 8));
         problemCard.setVisibility(View.GONE);
         root.addView(problemCard, Ui.lpTop(this, 0, 12));
@@ -136,11 +143,11 @@ public class MainActivity extends Activity {
         r1.addView(Ui.ghostButton(this, "Fit board", v -> {
             OverlayService.requestCalibration();
             toast("Drag the yellow frame over the board");
-        }), weight());
+        }), weightLeft());
         r1.addView(Ui.ghostButton(this, "Fix pieces", v -> {
             OverlayService.requestEditor();
             toast("Tap squares to correct the pieces");
-        }), weight());
+        }), weightRight());
         root.addView(quick, Ui.lpTop(this, 0, 12));
         quick.addView(r1, Ui.lpTop(this, 0, 4));
 
@@ -148,11 +155,11 @@ public class MainActivity extends Activity {
         r2.addView(Ui.ghostButton(this, "New game", v -> {
             OverlayService.newGame();
             toast("Position reset to the standard start");
-        }), weight());
+        }), weightLeft());
         r2.addView(Ui.ghostButton(this, "Show my move", v -> {
             OverlayService.requestHintNow();
             toast("Reading the board…");
-        }), weight());
+        }), weightRight());
         quick.addView(r2, Ui.lpTop(this, 0, 8));
 
         // ---- current settings summary (tap = settings)
@@ -175,30 +182,30 @@ public class MainActivity extends Activity {
         diagText.setTextIsSelectable(true);
         diag.addView(diagText, Ui.lpTop(this, 0, 4));
         LinearLayout dr = Ui.row(this);
-        dr.addView(Ui.ghostButton(this, "Refresh", v -> refresh()), weight());
+        dr.addView(Ui.ghostButton(this, "Refresh", v -> refresh()), weightLeft());
         dr.addView(Ui.ghostButton(this, "Copy", v -> {
             android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             cm.setPrimaryClip(android.content.ClipData.newPlainText("chesshint", diagText.getText()));
             toast("Diagnostics copied");
-        }), weight());
+        }), weightRight());
         diag.addView(dr, Ui.lpTop(this, 0, 6));
         LinearLayout dr2 = Ui.row(this);
         dr2.addView(Ui.ghostButton(this, "Close floating icon", v -> {
             OverlayService.stopEverything(this);
             refresh();
             toast("Floating icons removed");
-        }), weight());
-        dr2.addView(Ui.ghostButton(this, "Retry screen reading", v -> retryScreenReading()), weight());
+        }), weightLeft());
+        dr2.addView(Ui.ghostButton(this, "Retry screen reading", v -> retryScreenReading()), weightRight());
         diag.addView(dr2, Ui.lpTop(this, 0, 8));
         LinearLayout dr3 = Ui.row(this);
         dr3.addView(Ui.ghostButton(this, "Clear log", v -> {
             CrashGuard.clear(this);
             refresh();
-        }), weight());
+        }), weightLeft());
         dr3.addView(Ui.ghostButton(this, "Hide ♞ button", v -> {
             OverlayService.hideBubbleOnly();
             toast("Floating ♞ hidden");
-        }), weight());
+        }), weightRight());
         diag.addView(dr3, Ui.lpTop(this, 0, 8));
         LinearLayout dr4 = Ui.row(this);
         dr4.addView(Ui.primaryButton(this, "TEST SCREEN READING", Ui.ACCENT2, 0xFF06121F, v -> {
@@ -214,7 +221,7 @@ public class MainActivity extends Activity {
         how.addView(Ui.sectionTitle(this, "HOW TO USE"));
         how.addView(Ui.text(this, "1.  Allow both permissions above, then press START PANEL.\n"
                 + "2.  Open your chess game — your pieces must be at the BOTTOM (use ME: WHITE/BLACK in the ♞ panel if not).\n"
-                + "3.  Tap the floating ♞ → SHOW MY MOVE.  The arrow tells you exactly which piece to move and where.\n"
+                + "3.  Tap the floating ♞ → SHOW MY MOVE (or keep AUTO: ON). Select any piece on the board to see its legal moves.\n"
                 + "4.  Tap the red ✕ on the ♞ bubble (or ✖ STOP & CLOSE inside the panel) to close it anytime.",
                 12.5f, Ui.TEXT_DIM, false), Ui.lpTop(this, 0, 6));
         root.addView(how, Ui.lpTop(this, 0, 12));
@@ -222,9 +229,15 @@ public class MainActivity extends Activity {
         return sv;
     }
 
-    private LinearLayout.LayoutParams weight() {
+    private LinearLayout.LayoutParams weightLeft() {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        p.rightMargin = Ui.dp(this, 8);
+        p.rightMargin = Ui.dp(this, 5);
+        return p;
+    }
+
+    private LinearLayout.LayoutParams weightRight() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        p.leftMargin = Ui.dp(this, 5);
         return p;
     }
 
@@ -307,8 +320,6 @@ public class MainActivity extends Activity {
             problemDismissed = false;
             CrashGuard.clearLastProblem();
             CrashGuard.step(this, "onActivityResult RESULT_OK");
-            // Mark starting BEFORE startForegroundService so onResume() (which runs 1ms later)
-            // never calls stopService() and causes ForegroundServiceDidNotStartInTimeException!
             OverlayService.markStarting(res, data);
             Intent i = new Intent(this, OverlayService.class);
             i.putExtra(OverlayService.EXTRA_CODE, res);
@@ -388,16 +399,10 @@ public class MainActivity extends Activity {
                 + (fen == null ? "Position: not tracked yet" : "Position: " + fen));
     }
 
-    private static String firstLine(String s) {
-        if (s == null) return "";
-        int i = s.indexOf('\n');
-        return i < 0 ? s.trim() : s.substring(0, i).trim();
-    }
-
     private void shareLog() {
         try {
             StringBuilder sb = new StringBuilder();
-            sb.append("Chess Hint Panel ").append("1.9").append("\n");
+            sb.append("v2.2\n");
             sb.append("android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (api ").append(android.os.Build.VERSION.SDK_INT).append(")\n");
             sb.append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL).append("\n\n");
@@ -408,7 +413,7 @@ public class MainActivity extends Activity {
             if (log != null && !log.isEmpty()) sb.append("log:\n").append(log);
             Intent i = new Intent(Intent.ACTION_SEND);
             i.setType("text/plain");
-            i.putExtra(Intent.EXTRA_SUBJECT, "Chess Hint Panel log");
+            i.putExtra(Intent.EXTRA_SUBJECT, "Diagnostic log");
             i.putExtra(Intent.EXTRA_TEXT, sb.toString());
             startActivity(Intent.createChooser(i, "Share log"));
         } catch (Throwable t) {

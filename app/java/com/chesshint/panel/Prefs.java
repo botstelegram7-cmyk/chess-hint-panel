@@ -18,20 +18,20 @@ public class Prefs {
     // ------------------------------------------------------------- calibration
 
     public Rect boardRect() {
-        int x = sp.getInt("bx_v3", Integer.MIN_VALUE);
+        int x = sp.getInt("bx_v4", Integer.MIN_VALUE);
         if (x == Integer.MIN_VALUE) return null;
-        int y = sp.getInt("by_v3", 0), s = sp.getInt("bs_v3", 0);
+        int y = sp.getInt("by_v4", 0), s = sp.getInt("bs_v4", 0);
         if (s < 64) return null;
         return new Rect(x, y, x + s, y + s);
     }
 
     public void setBoardRect(Rect r) {
-        sp.edit().putInt("bx_v3", r.left).putInt("by_v3", r.top).putInt("bs_v3", r.width()).apply();
+        sp.edit().putInt("bx_v4", r.left).putInt("by_v4", r.top).putInt("bs_v4", r.width()).apply();
     }
 
     public boolean hasRect() { return boardRect() != null; }
 
-    public void clearBoardRect() { sp.edit().remove("bx_v3").remove("by_v3").remove("bs_v3").apply(); }
+    public void clearBoardRect() { sp.edit().remove("bx_v4").remove("by_v4").remove("bs_v4").apply(); }
 
     // ------------------------------------------------------------- game
 
@@ -39,8 +39,8 @@ public class Prefs {
     public boolean whiteBottom() { return sp.getBoolean("wbottom", true); }
     public void setWhiteBottom(boolean b) { sp.edit().putBoolean("wbottom", b).apply(); }
 
-    public boolean auto() { return sp.getBoolean("auto", false); }
-    public void setAuto(boolean b) { sp.edit().putBoolean("auto", b).apply(); }
+    public boolean auto() { return sp.getBoolean("auto_v3", true); }
+    public void setAuto(boolean b) { sp.edit().putBoolean("auto_v3", b).apply(); }
 
     /** -1 = maximum strength, else a target Elo (1350..2850) */
     public int elo() { return sp.getInt("elo", -1); }

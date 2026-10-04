@@ -1,7 +1,6 @@
 package com.chesshint.panel;
 
 import android.content.Context;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -33,7 +32,7 @@ public class PanelView extends LinearLayout {
         this.ctx = c;
         this.l = l;
         setOrientation(VERTICAL);
-        int pad = Ui.dp(c, 10);
+        int pad = Ui.dp(c, 11);
         setPadding(pad, pad, pad, pad);
         setBackground(Ui.round(0xF50C141C, 0xFF2A3B4E, c, 18));
 
@@ -44,30 +43,31 @@ public class PanelView extends LinearLayout {
         moveBtn = Ui.primaryButton(c, "\u265E   SHOW MY MOVE", Ui.ACCENT, 0xFF06210F, v -> l.onMove());
         addView(moveBtn, full());
 
-        autoBtn = tile("AUTO: OFF", 0, v -> l.onAuto());
+        autoBtn = tile("AUTO: ON", 0, v -> l.onAuto());
         LinearLayout r1 = Ui.row(c);
-        r1.addView(autoBtn, tileLp());
-        r1.addView(tile("SETTINGS", 0, v -> l.onSettings()), tileLp());
+        r1.addView(autoBtn, tileLpLeft());
+        r1.addView(tile("SETTINGS", 0, v -> l.onSettings()), tileLpRight());
         addView(r1, top());
 
         LinearLayout r2 = Ui.row(c);
         sideBtn = tile("ME: WHITE", 0, v -> l.onFlip());
-        r2.addView(sideBtn, tileLp());
-        r2.addView(tile("FIT BOARD", 0, v -> l.onFit()), tileLp());
+        r2.addView(sideBtn, tileLpLeft());
+        r2.addView(tile("FIT BOARD", 0, v -> l.onFit()), tileLpRight());
         addView(r2, top());
 
         LinearLayout r3 = Ui.row(c);
-        r3.addView(tile("FIX PIECES", 0, v -> l.onFix()), tileLp());
-        r3.addView(tile("NEW GAME", 0, v -> l.onNewGame()), tileLp());
+        r3.addView(tile("FIX PIECES", 0, v -> l.onFix()), tileLpLeft());
+        r3.addView(tile("NEW GAME", 0, v -> l.onNewGame()), tileLpRight());
         addView(r3, top());
 
         LinearLayout r4 = Ui.row(c);
-        r4.addView(tile("HIDE MARKS", 0, v -> l.onHide()), tileLp());
-        r4.addView(tile("HIDE \u265E", 0, v -> l.onHideBubble()), tileLp());
+        r4.addView(tile("HIDE MARKS", 0, v -> l.onHide()), tileLpLeft());
+        r4.addView(tile("HIDE \u265E", 0, v -> l.onHideBubble()), tileLpRight());
         addView(r4, top());
 
         LinearLayout r5 = Ui.row(c);
-        r5.addView(tile("\u2716  STOP & CLOSE", Ui.DANGER, v -> l.onStop()), tileLp());
+        r5.addView(tile("\u2716  STOP & CLOSE", Ui.DANGER, v -> l.onStop()),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         addView(r5, top());
     }
 
@@ -85,9 +85,15 @@ public class PanelView extends LinearLayout {
         return p;
     }
 
-    private LinearLayout.LayoutParams tileLp() {
+    private LinearLayout.LayoutParams tileLpLeft() {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        p.rightMargin = Ui.dp(ctx, 7);
+        p.rightMargin = Ui.dp(ctx, 3.5f);
+        return p;
+    }
+
+    private LinearLayout.LayoutParams tileLpRight() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        p.leftMargin = Ui.dp(ctx, 3.5f);
         return p;
     }
 

@@ -7,6 +7,13 @@ out/
 !apk/*.apk
 !docs/screenshots/*.png
 
+# signing secrets (never commit private keys or password files)
+*.jks
+*.keystore
+.signing.env
+signing.env
+keystore.properties
+
 # editor / os
 .idea/
 *.iml

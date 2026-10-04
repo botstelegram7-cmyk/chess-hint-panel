@@ -31,6 +31,8 @@ public class Vision {
         public float[] score = new float[64];
         public float[] dmax = new float[64];
         public float[] inkLum = new float[64];
+        public boolean[] highlighted = new boolean[64];
+        public float[] highlightScore = new float[64];
         public float threshold;
         public float lmid;
         public boolean ok;
@@ -75,14 +77,35 @@ public class Vision {
 
     /**
      * Reads a board straight from a screenshot.
-     * Crops the exact board area and works at <= 720 px without altering the aligned rect.
+     * First verifies and snaps `rect` to the exact 8x8 grid lines on `full` (so if the board
+     * shifted due to a bot chat bubble, layout change, or stale calibration, `rect` is updated
+     * in place to 0px error before reading the 64 squares).
      */
     public static Result read(Bitmap full, Rect rect) {
         Result res = new Result();
         if (full == null || rect == null || rect.width() < 48) return res;
+        int W0 = full.getWidth(), H0 = full.getHeight();
         Rect c = new Rect(Math.max(0, rect.left), Math.max(0, rect.top),
-                Math.min(full.getWidth(), rect.right), Math.min(full.getHeight(), rect.bottom));
+                Math.min(W0, rect.right), Math.min(H0, rect.bottom));
         if (c.width() < 48 || c.height() < 48) return res;
+
+        // Re-align `c` on `full` if the board shifted vertically/horizontally or needs 1px grid snap
+        try {
+            int padY = Math.min(Math.max(16, c.height() / 5), H0);
+            int stripTop = Math.max(0, c.top - padY);
+            int stripBot = Math.min(H0, c.bottom + padY);
+            int stripH = stripBot - stripTop;
+            if (stripH >= c.width() && W0 <= 1440) {
+                int[] stripPx = new int[W0 * stripH];
+                full.getPixels(stripPx, 0, W0, 0, stripTop, W0, stripH);
+                Rect localRect = new Rect(c.left, c.top - stripTop, c.right, c.bottom - stripTop);
+                Rect snapped = snapOrRealign(stripPx, W0, stripH, localRect);
+                if (snapped != null) {
+                    c.set(snapped.left, snapped.top + stripTop, snapped.right, snapped.bottom + stripTop);
+                    rect.set(c);
+                }
+            }
+        } catch (Throwable ignored) { }
 
         Bitmap crop = null;
         boolean owned = false;
@@ -416,7 +439,163 @@ public class Vision {
                 if (f > bestF) { bestF = f; bestR = cand; }
             }
         }
-        return bestR;
+        return snapToExactGridLines(px, W, H, bestR);
+    }
+
+    /**
+     * Exact 1-pixel grid-line snapper: refines a coarsely aligned board Rect to 0px error
+     * by maximizing the 1-pixel edge step across all 9 horizontal lines (k=0..8) and
+     * internal vertical lines (k=1..7), gated by top-strip/bottom-strip checkerboard alternation.
+     */
+    private static Rect snapToExactGridLines(int[] px, int W, int H, Rect r) {
+        if (r == null || r.width() < 64) return r;
+        int x0 = r.left, y0 = r.top, s0 = r.width();
+        int bestY = y0, bestX = x0, bestS = s0;
+
+        // 1. Snap vertical position y and size s using exact 1-pixel horizontal steps across k=0..8
+        float bestYScore = -1f;
+        for (int ds = -4; ds <= 4; ds += 2) {
+            int s = s0 + ds;
+            if (s < 64 || x0 + s > W) continue;
+            for (int dy = -5; dy <= 5; dy++) {
+                int ny = y0 + dy;
+                if (ny < 0 || ny + s > H) continue;
+                if (outerStripAlt(px, W, H, x0, ny, s) < 0.024f) continue;
+                float sc = exactHLineStep(px, W, H, x0, ny, s);
+                if (sc > bestYScore) {
+                    bestYScore = sc;
+                    bestY = ny;
+                    bestS = s;
+                }
+            }
+        }
+        // 2. Snap horizontal position x if not already locked to full screen width
+        if (!(bestX == 0 && bestS == W)) {
+            float bestXScore = -1f;
+            for (int dx = -6; dx <= 6; dx++) {
+                int nx = x0 + dx;
+                if (nx < 0 || nx + bestS > W) continue;
+                float sc = exactVLineStep(px, W, H, nx, bestY, bestS);
+                if (sc > bestXScore) {
+                    bestXScore = sc;
+                    bestX = nx;
+                }
+            }
+        }
+        return new Rect(bestX, bestY, bestX + bestS, bestY + bestS);
+    }
+
+    /**
+     * Re-aligns a previously saved board Rect when the board may have shifted vertically
+     * (e.g. when a bot chat bubble appears above the board) or horizontally on screen.
+     */
+    private static Rect snapOrRealign(int[] px, int W, int H, Rect r) {
+        if (r == null || r.width() < 64) return r;
+        int x0 = clampI(r.left, 0, Math.max(0, W - 64));
+        int s0 = Math.min(r.width(), Math.min(W - x0, H));
+        if (s0 < 64) return r;
+        int y0 = clampI(r.top, 0, H - s0);
+
+        // Search all vertical offsets inside the padded strip using exact 9-line step + outer-strip alternation
+        int bestY = y0;
+        float bestSc = -1f;
+        int maxShift = Math.max(12, s0 / 5);
+        for (int dy = -maxShift; dy <= maxShift; dy++) {
+            int ny = y0 + dy;
+            if (ny < 0 || ny + s0 > H) continue;
+            float outAlt = outerStripAlt(px, W, H, x0, ny, s0);
+            if (outAlt < 0.025f) continue;
+            float hStep = exactHLineStep(px, W, H, x0, ny, s0);
+            float sc = hStep * (0.5f + Math.min(0.5f, outAlt * 4f));
+            if (sc > bestSc) {
+                bestSc = sc;
+                bestY = ny;
+            }
+        }
+        Rect aligned = new Rect(x0, bestY, x0 + s0, bestY + s0);
+        return snapToExactGridLines(px, W, H, aligned);
+    }
+
+    /** Exact 1-pixel vertical color step across all 9 horizontal grid lines k=0..8 */
+    private static float exactHLineStep(int[] px, int W, int H, int x0, int y0, int side) {
+        float sq = side / 8f;
+        float sum = 0f;
+        int cnt = 0;
+        for (int k = 0; k <= 8; k++) {
+            int yk = y0 + Math.round(k * sq);
+            if (yk < 2 || yk >= H - 2) continue;
+            float lineSum = 0f;
+            int lineCnt = 0;
+            for (int f = 0; f < 8; f++) {
+                int xA = clampI(x0 + Math.round((f + 0.30f) * sq), 0, W - 1);
+                int xB = clampI(x0 + Math.round((f + 0.70f) * sq), 0, W - 1);
+                float d1 = colDist(px[(yk - 1) * W + xA], px[yk * W + xA])
+                         + colDist(px[(yk - 1) * W + xB], px[yk * W + xB]);
+                float d2 = colDist(px[(yk - 2) * W + xA], px[(yk + 1) * W + xA])
+                         + colDist(px[(yk - 2) * W + xB], px[(yk + 1) * W + xB]);
+                // Subtract nearby interior step 4px away so only sharp grid lines peak
+                int yIn = clampI(yk + (k < 8 ? 4 : -4), 1, H - 1);
+                float dIn = colDist(px[(yIn - 1) * W + xA], px[yIn * W + xA])
+                          + colDist(px[(yIn - 1) * W + xB], px[yIn * W + xB]);
+                lineSum += Math.max(0f, (d1 + 0.35f * d2) - 0.8f * dIn);
+                lineCnt += 2;
+            }
+            if (lineCnt > 0) {
+                float wgt = (k == 0 || k == 8) ? 0.75f : 1.25f;
+                sum += wgt * (lineSum / lineCnt);
+                cnt++;
+            }
+        }
+        return cnt > 0 ? sum / cnt : 0f;
+    }
+
+    /** Exact 1-pixel horizontal color step across the 7 internal vertical grid lines k=1..7 */
+    private static float exactVLineStep(int[] px, int W, int H, int x0, int y0, int side) {
+        float sq = side / 8f;
+        float sum = 0f;
+        int cnt = 0;
+        for (int k = 1; k <= 7; k++) {
+            int xk = x0 + Math.round(k * sq);
+            if (xk < 2 || xk >= W - 2) continue;
+            float lineSum = 0f;
+            int lineCnt = 0;
+            for (int r = 0; r < 8; r++) {
+                int yA = clampI(y0 + Math.round((r + 0.30f) * sq), 0, H - 1);
+                int yB = clampI(y0 + Math.round((r + 0.70f) * sq), 0, H - 1);
+                float d1 = colDist(px[yA * W + (xk - 1)], px[yA * W + xk])
+                         + colDist(px[yB * W + (xk - 1)], px[yB * W + xk]);
+                int xIn = clampI(xk + 4, 1, W - 1);
+                float dIn = colDist(px[yA * W + (xIn - 1)], px[yA * W + xIn])
+                          + colDist(px[yB * W + (xIn - 1)], px[yB * W + xIn]);
+                lineSum += Math.max(0f, d1 - 0.8f * dIn);
+                lineCnt += 2;
+            }
+            if (lineCnt > 0) { sum += lineSum / lineCnt; cnt++; }
+        }
+        return cnt > 0 ? sum / cnt : 0f;
+    }
+
+    /**
+     * Verifies that BOTH the top strip of row 0 (y = top + 14% of sq) AND the bottom strip of
+     * row 7 (y = bottom - 14% of sq) alternate light/dark across files f=0..7.
+     * If `r` is shifted vertically by >= 14% of a square into a UI header/footer, one strip
+     * lands in the uniform UI bar and its alternation drops near 0.
+     */
+    private static float outerStripAlt(int[] px, int W, int H, int x0, int y0, int side) {
+        if (side < 64 || x0 < 0 || y0 < 0 || x0 + side > W || y0 + side > H) return 0f;
+        float sq = side / 8f;
+        int yTop = clampI(y0 + Math.round(0.14f * sq), 0, H - 1);
+        int yBot = clampI(y0 + side - Math.round(0.14f * sq), 0, H - 1);
+        float topAlt = 0f, botAlt = 0f;
+        for (int f = 0; f < 7; f++) {
+            int x1 = clampI(x0 + Math.round((f + 0.80f) * sq), 0, W - 1);
+            int x2 = clampI(x0 + Math.round((f + 1.80f) * sq), 0, W - 1);
+            topAlt += colDist(px[yTop * W + x1], px[yTop * W + x2]);
+            botAlt += colDist(px[yBot * W + x1], px[yBot * W + x2]);
+        }
+        topAlt /= 7f;
+        botAlt /= 7f;
+        return Math.min(topAlt, botAlt);
     }
 
     /** final quality of a frame: line contrast + board edge + colour alternation */
@@ -726,13 +905,14 @@ public class Vision {
                         float l = (0.299f * rr + 0.587f * gg + 0.114f * bb) / 255f;
                         float g = (x > 0 && x < bw - 1 && y > 0 && y < bh - 1) ? mag[y * bw + x] : 0f;
                         int bi = (y - sy0) * bwI + (x - sx0);
+                        boolean neonOverlay = (gg > 175 && gg > rr + 45 && gg > bb + 45);
                         if (bi < lumI.length) {
                             lumI[bi] = l;
-                            if (d > 0.055f || (d > 0.036f && g > 0.045f)) {
+                            if (!neonOverlay && (d > 0.055f || (d > 0.036f && g > 0.045f))) {
                                 rawMask[bi] = true;
                                 if (inCoreY) ink++;
                             }
-                            if (d > 0.075f || (d > 0.052f && g > 0.065f)) {
+                            if (!neonOverlay && (d > 0.075f || (d > 0.052f && g > 0.065f))) {
                                 silMask[bi] = true;
                             }
                         }
@@ -959,7 +1139,8 @@ public class Vision {
         }
 
         // Reject regions that do not have alternating light/dark board squares (e.g. a UI screen or stale rect)
-        if (colDist(bgRgb[0], bgRgb[1]) < 0.032f || colorAltFull(px, w, h, rect) < 0.16f) {
+        if (colDist(bgRgb[0], bgRgb[1]) < 0.032f || colorAltFull(px, w, h, rect) < 0.16f
+                || outerStripAlt(px, w, h, rect.left, rect.top, rect.width()) < 0.024f) {
             res.ok = false;
             res.note = "not a chess board";
             return res;
@@ -977,6 +1158,9 @@ public class Vision {
             res.bands[i] = bands[i];
             res.score[i] = score[i];
             res.dmax[i] = dmaxArr[i];
+            float hlDist = colDist(cornerRgb[i], bgRgb[parity[i]]);
+            res.highlightScore[i] = hlDist;
+            res.highlighted[i] = hlDist > 0.075f;
         }
         res.threshold = thr;
         res.lmid = lmid;
@@ -1039,7 +1223,11 @@ public class Vision {
         float pH = res.pieceHeight[idx];
         float asym = res.asym[idx];
         float ink = res.inkFrac[idx];
-        float[] nb = res.bands[idx];
+        float[] rawB = res.bands[idx];
+        float maxB = 1e-4f;
+        for (int b = 0; b < 8; b++) if (rawB[b] > maxB) maxB = rawB[b];
+        float[] nb = new float[8];
+        for (int b = 0; b < 8; b++) nb[b] = rawB[b] / maxB;
 
         // Compute board-adaptive pawn height & ink references
         float pawnInkRef = 0.36f;
@@ -1054,32 +1242,33 @@ public class Vision {
         }
 
         int type;
-        // 1) PAWN: shortest height (pH < 0.675) or narrow middle silhouette (nb[3] < 0.58 && nb[4] < 0.52)
-        if (pH < 0.675f || (nb[3] < 0.58f && nb[4] < 0.52f) || (pH < 0.695f && ink <= pawnInkRef * 1.12f)) {
+        // 1) PAWN: narrow upper/middle silhouette (nb[3] < 0.65 && nb[4] < 0.63 && nb[0] < 0.50) or shortest height
+        if (pH < 0.675f || (nb[0] < 0.50f && nb[3] < 0.65f && nb[4] < 0.63f) || (pH < 0.695f && ink <= pawnInkRef * 1.12f)) {
             type = 1; // pawn
         }
-        // 2) ROOK: flat wide battlements at top (nb[0] > 0.50, nb[1] wider than waist nb[3], nb[4])
-        else if (nb[0] > 0.50f && nb[1] > nb[3] + 0.09f && nb[1] > nb[4] + 0.07f) {
+        // 2) ROOK: flat wide battlements at top (nb[0] >= 0.48, nb[1..2] wider than straight tower waist nb[3..5])
+        else if ((nb[0] > 0.50f && nb[1] > nb[3] + 0.08f && nb[1] > nb[4] + 0.07f)
+                || (nb[0] >= 0.46f && nb[1] >= nb[3] - 0.01f && nb[2] > nb[3] + 0.14f && nb[5] < 0.82f)) {
             type = 4; // rook
         }
-        // 3) BISHOP: narrow pointed mitre at top (nb[0] < 0.34, nb[1] < 0.40) widening into belly nb[4]
-        else if (nb[0] < 0.34f && nb[1] < 0.40f && nb[2] < 0.68f && nb[4] > nb[1] + 0.34f) {
-            type = 3; // bishop
+        // 3) KNIGHT: strong left-right asymmetry (horse head in profile)
+        else if (asym > 0.105f) {
+            type = 2; // knight
         }
-        // 4) KING: narrow cross at top (nb[0] < 0.42, nb[1] < 0.56) jumping sharply to wide crown lobes (nb[2] > 0.76), mirror-symmetric
-        else if (nb[0] < 0.42f && nb[1] < 0.56f && nb[2] > 0.76f && (nb[2] - nb[1]) > 0.24f && asym < 0.06f) {
+        // 4) KING: narrow cross at top (nb[0] < 0.42, nb[1] < 0.56) jumping sharply to wide crown lobes (nb[2] > 0.80, nb[5] > 0.85)
+        else if (nb[0] < 0.42f && nb[1] < 0.56f && nb[2] > 0.80f && (nb[2] - nb[1]) > 0.24f && nb[5] > 0.85f && asym < 0.06f) {
             type = 6; // king
         }
-        // 5) KNIGHT: strong left-right asymmetry (horse head in profile) or peak at nb[3] narrowing at neck nb[5]
-        else if (asym > 0.110f || (nb[0] < 0.45f && nb[3] > 0.88f && nb[3] > nb[5] + 0.10f)) {
-            type = 2; // knight
+        // 5) BISHOP: pointed mitre tip (nb[0] < 0.36, nb[1] < 0.45, nb[2] < 0.78) with neck narrower than King (nb[5] < 0.84)
+        else if (nb[0] < 0.36f && nb[1] < 0.45f && nb[2] < 0.78f && nb[5] < 0.84f) {
+            type = 3; // bishop
         }
         // 6) QUEEN: wide multi-pointed crown (nb[0..1] >= 0.42) and very wide body (nb[3..4] > 0.82)
         else if (nb[3] > 0.82f && nb[4] > 0.82f) {
             type = 5; // queen
         } else if (nb[1] > nb[3] + 0.06f) {
             type = 4; // rook fallback
-        } else if (asym > 0.135f) {
+        } else if (asym > 0.105f) {
             type = 2; // knight fallback
         } else {
             type = 3; // bishop fallback
@@ -1187,7 +1376,7 @@ public class Vision {
                 } else if (base == 2) {
                     fallbackOrder = (rank == 0 || rank == 7) ? new int[]{3, 4, 5} : new int[]{3, 1, 4, 5};
                 } else {
-                    fallbackOrder = new int[]{3, 4, 5};
+                    fallbackOrder = (rank == 0 || rank == 7) ? new int[]{3, 4, 5} : new int[]{3, 4, 5, 1};
                 }
                 for (int fb : fallbackOrder) {
                     if (cnt[fb] < maxPiece[fb]) { base = fb; break; }

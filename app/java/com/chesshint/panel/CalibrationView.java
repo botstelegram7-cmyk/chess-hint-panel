@@ -9,7 +9,7 @@ import android.graphics.Typeface;
 import android.view.MotionEvent;
 import android.view.View;
 
-/** Full screen "put the frame over the board" helper. */
+/** Full screen "put the frame over the board" helper (in exact physical screen coordinates). */
 public class CalibrationView extends View {
 
     public interface Listener {
@@ -22,6 +22,7 @@ public class CalibrationView extends View {
     private final Paint t = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final float dp;
     private final Listener l;
+    private final int[] screenLoc = new int[2];
 
     public Rect rect = new Rect();
     private final RectF btnAuto = new RectF(), btnSave = new RectF(), btnCancel = new RectF();
@@ -50,49 +51,61 @@ public class CalibrationView extends View {
         btnSave.set(x + bw + gap, y, x + 2 * bw + gap, y + bh);
         btnCancel.set(x + 2 * (bw + gap), y, x + 3 * bw + 2 * gap, y + bh);
         if (rect.width() < 40) {
-            int s = Math.min(w, h) * 6 / 10;
-            rect.set((w - s) / 2, (h - s) / 2 - d(40), (w + s) / 2, (h + s) / 2 - d(40));
+            screenLoc[0] = 0;
+            screenLoc[1] = 0;
+            try { getLocationOnScreen(screenLoc); } catch (Throwable ignored) { }
+            int s = Math.min(w, h) * 8 / 10;
+            int left = screenLoc[0] + (w - s) / 2;
+            int top = screenLoc[1] + (h - s) / 2 - d(30);
+            rect.set(left, top, left + s, top + s);
         }
     }
 
     @Override
     protected void onDraw(Canvas c) {
         int W = getWidth(), H = getHeight();
+        screenLoc[0] = 0;
+        screenLoc[1] = 0;
+        try { getLocationOnScreen(screenLoc); } catch (Throwable ignored) { }
+
+        int rL = rect.left - screenLoc[0], rT = rect.top - screenLoc[1];
+        int rR = rect.right - screenLoc[0], rB = rect.bottom - screenLoc[1];
+
         p.setStyle(Paint.Style.FILL);
         p.setColor(0xAA000000);
-        c.drawRect(0, 0, W, rect.top, p);
-        c.drawRect(0, rect.bottom, W, H, p);
-        c.drawRect(0, rect.top, rect.left, rect.bottom, p);
-        c.drawRect(rect.right, rect.top, W, rect.bottom, p);
+        c.drawRect(0, 0, W, rT, p);
+        c.drawRect(0, rB, W, H, p);
+        c.drawRect(0, rT, rL, rB, p);
+        c.drawRect(rR, rT, W, rB, p);
 
         // grid
         p.setStyle(Paint.Style.STROKE);
         p.setStrokeWidth(dp);
         p.setColor(0x66FFD400);
-        float s = rect.width() / 8f;
+        float s = (rR - rL) / 8f;
         for (int k = 1; k < 8; k++) {
-            c.drawLine(rect.left + k * s, rect.top, rect.left + k * s, rect.bottom, p);
-            c.drawLine(rect.left, rect.top + k * s, rect.right, rect.top + k * s, p);
+            c.drawLine(rL + k * s, rT, rL + k * s, rB, p);
+            c.drawLine(rL, rT + k * s, rR, rT + k * s, p);
         }
         p.setStrokeWidth(dp * 2.5f);
         p.setColor(0xFFFFD400);
-        c.drawRect(rect.left, rect.top, rect.right, rect.bottom, p);
+        c.drawRect(rL, rT, rR, rB, p);
 
         // corner handles
-        float hs = d(26);
+        float hs = d(24);
         p.setStyle(Paint.Style.FILL);
         p.setColor(0xFF00E676);
-        c.drawRect(rect.left - hs / 2, rect.top - hs / 2, rect.left + hs / 2, rect.top + hs / 2, p);
-        c.drawRect(rect.right - hs / 2, rect.top - hs / 2, rect.right + hs / 2, rect.top + hs / 2, p);
-        c.drawRect(rect.left - hs / 2, rect.bottom - hs / 2, rect.left + hs / 2, rect.bottom + hs / 2, p);
-        c.drawRect(rect.right - hs / 2, rect.bottom - hs / 2, rect.right + hs / 2, rect.bottom + hs / 2, p);
+        c.drawRoundRect(new RectF(rL - hs / 2, rT - hs / 2, rL + hs / 2, rT + hs / 2), dp * 5, dp * 5, p);
+        c.drawRoundRect(new RectF(rR - hs / 2, rT - hs / 2, rR + hs / 2, rT + hs / 2), dp * 5, dp * 5, p);
+        c.drawRoundRect(new RectF(rL - hs / 2, rB - hs / 2, rL + hs / 2, rB + hs / 2), dp * 5, dp * 5, p);
+        c.drawRoundRect(new RectF(rR - hs / 2, rB - hs / 2, rR + hs / 2, rB + hs / 2), dp * 5, dp * 5, p);
 
-        t.setTextSize(dp * 16);
+        t.setTextSize(dp * 15.5f);
         t.setColor(0xFFFFFFFF);
-        c.drawText("Drag the frame exactly over the chess board", W / 2f, d(46), t);
-        t.setTextSize(dp * 12.5f);
+        c.drawText("Align frame over the chessboard", W / 2f, d(44), t);
+        t.setTextSize(dp * 12f);
         t.setColor(0xFFB8CAD9);
-        c.drawText("corners = resize  \u2022  middle = move  \u2022  empty area = new frame", W / 2f, d(68), t);
+        c.drawText("Tap AUTO DETECT or drag corners to fit", W / 2f, d(65), t);
 
         drawBtn(c, btnAuto, "AUTO DETECT", 0xFF1B2C3E, 0xFF7FD4FF);
         drawBtn(c, btnSave, "\u2714  SAVE", 0xFF00E676, 0xFF062015);
@@ -107,20 +120,25 @@ public class CalibrationView extends View {
         p.setStrokeWidth(dp * 1.4f);
         p.setColor(0x66FFFFFF);
         c.drawRoundRect(r, d(12), d(12), p);
-        t.setTextSize(dp * 14);
+        t.setTextSize(dp * 13.5f);
         t.setColor(fg);
         c.drawText(label, r.centerX(), r.centerY() - (t.descent() + t.ascent()) / 2f, t);
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        float x = e.getX(), y = e.getY();
+        float vx = e.getX(), vy = e.getY();
+        screenLoc[0] = 0;
+        screenLoc[1] = 0;
+        try { getLocationOnScreen(screenLoc); } catch (Throwable ignored) { }
+        float x = vx + screenLoc[0], y = vy + screenLoc[1];
+
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = x; downY = y;
-                if (btnAuto.contains(x, y)) { mode = 10; return true; }
-                if (btnSave.contains(x, y)) { mode = 11; return true; }
-                if (btnCancel.contains(x, y)) { mode = 12; return true; }
+                if (btnAuto.contains(vx, vy)) { mode = 10; return true; }
+                if (btnSave.contains(vx, vy)) { mode = 11; return true; }
+                if (btnCancel.contains(vx, vy)) { mode = 12; return true; }
                 float grab = d(46);
                 int c = nearestCorner(x, y, grab);
                 if (c > 0) {
@@ -163,9 +181,9 @@ public class CalibrationView extends View {
                 return true;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
-                if (mode == 10 && btnAuto.contains(x, y)) l.onCalibAuto();
-                else if (mode == 11 && btnSave.contains(x, y)) l.onCalibSave(new Rect(rect));
-                else if (mode == 12 && btnCancel.contains(x, y)) l.onCalibCancel();
+                if (mode == 10 && btnAuto.contains(vx, vy)) l.onCalibAuto();
+                else if (mode == 11 && btnSave.contains(vx, vy)) l.onCalibSave(new Rect(rect));
+                else if (mode == 12 && btnCancel.contains(vx, vy)) l.onCalibCancel();
                 mode = 0;
                 return true;
         }

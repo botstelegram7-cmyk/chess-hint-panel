@@ -5,6 +5,7 @@ import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -19,11 +20,12 @@ public class SettingsActivity extends Activity {
 
     private Prefs prefs;
     private MarkerPreviewView preview;
-    private LinearLayout styleRow, sizeRow, paletteRow, strengthRow, timeRow, sideRow;
-    private TextView bubbleRowLabel, calibrationLabel;
+    private LinearLayout styleRow, sizeRow, paletteRow, strengthRow, timeRow, sideRow, bubbleRow;
+    private TextView calibrationLabel;
 
     @Override
     protected void onCreate(Bundle b) {
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(b);
         prefs = new Prefs(this);
         setContentView(build());
@@ -41,17 +43,21 @@ public class SettingsActivity extends Activity {
 
         LinearLayout root = Ui.column(this);
         int pad = Ui.dp(this, 14);
-        root.setPadding(pad, Ui.dp(this, 10), pad, Ui.dp(this, 26));
+        root.setPadding(pad, Ui.dp(this, 6), pad, Ui.dp(this, 24));
         sv.addView(root);
 
         // -------------------------------------------------- slim top bar
         LinearLayout bar = Ui.row(this);
-        TextView back = Ui.text(this, "‹", 26f, Ui.TEXT, true);
-        back.setPadding(Ui.dp(this, 6), 0, Ui.dp(this, 14), 0);
+        TextView back = Ui.text(this, "\u2039  Back", 14f, Ui.TEXT, true);
+        back.setBackground(Ui.round(Ui.CHIP, Ui.CARD_BORDER, this, 10));
+        back.setPadding(Ui.dp(this, 12), Ui.dp(this, 6), Ui.dp(this, 12), Ui.dp(this, 6));
         back.setOnClickListener(v -> finish());
         bar.addView(back);
-        bar.addView(Ui.text(this, "Settings", 17f, Ui.TEXT, true));
-        root.addView(bar, Ui.lpTop(this, 0, 6));
+
+        TextView title = Ui.text(this, "Settings", 16f, Ui.TEXT, true);
+        title.setPadding(Ui.dp(this, 12), 0, 0, 0);
+        bar.addView(title);
+        root.addView(bar, Ui.lpTop(this, 0, 2));
 
         // -------------------------------------------------- MARKER section
         LinearLayout marker = Ui.card(this);
@@ -102,7 +108,7 @@ public class SettingsActivity extends Activity {
                     prefs.setShowChip(checked);
                     push();
                 }));
-        root.addView(marker, Ui.lpTop(this, 0, 14));
+        root.addView(marker, Ui.lpTop(this, 0, 12));
 
         // -------------------------------------------------- PLAY section
         LinearLayout play = Ui.card(this);
@@ -129,7 +135,7 @@ public class SettingsActivity extends Activity {
             prefs.setVibrations(checked);
             push();
         }));
-        root.addView(play, Ui.lpTop(this, 0, 14));
+        root.addView(play, Ui.lpTop(this, 0, 12));
 
         // -------------------------------------------------- BOARD section
         LinearLayout boardCard = Ui.card(this);
@@ -137,44 +143,41 @@ public class SettingsActivity extends Activity {
         calibrationLabel = Ui.text(this, "", 12.5f, Ui.TEXT_DIM, false);
         boardCard.addView(calibrationLabel);
         LinearLayout br = Ui.row(this);
-        br.addView(Ui.ghostButton(this, "Fit frame", v -> call(0)), Ui.lpTop(this, 0, 10));
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(Ui.dp(this, 8), 1);
-        br.addView(new View(this), sp);
-        br.addView(Ui.ghostButton(this, "Auto detect", v -> call(1)), Ui.lpTop(this, 0, 10));
-        boardCard.addView(br, Ui.lpTop(this, 0, 8));
+        br.addView(Ui.ghostButton(this, "Fit frame", v -> call(0)), weightLeft());
+        br.addView(Ui.ghostButton(this, "Auto detect", v -> call(1)), weightRight());
+        boardCard.addView(br, Ui.lpTop(this, 0, 10));
         LinearLayout br2 = Ui.row(this);
-        br2.addView(Ui.ghostButton(this, "Fix pieces", v -> call(2)), Ui.lpTop(this, 0, 8));
-        br2.addView(new View(this), new LinearLayout.LayoutParams(Ui.dp(this, 8), 1));
-        br2.addView(Ui.ghostButton(this, "New game", v -> call(3)), Ui.lpTop(this, 0, 8));
-        boardCard.addView(br2);
+        br2.addView(Ui.ghostButton(this, "Fix pieces", v -> call(2)), weightLeft());
+        br2.addView(Ui.ghostButton(this, "New game", v -> call(3)), weightRight());
+        boardCard.addView(br2, Ui.lpTop(this, 0, 8));
 
         boardCard.addView(Ui.text(this, "Bubble size", 12.5f, Ui.TEXT_DIM, false), Ui.lpTop(this, 0, 14));
-        bubbleRowLabel = Ui.text(this, "", 12.5f, Ui.TEXT, false);
-        LinearLayout bubbleRow = Ui.chipRow(this);
-        for (int i = 0; i < 3; i++) {
-            final int size = i;
-            String[] names = {"Small", "Normal", "Large"};
-            bubbleRow.addView(Ui.chip(this, names[i], prefs.bubbleSize() == i, v -> {
-                prefs.setBubbleSize(size);
-                push();
-                refreshAll();
-            }));
-        }
+        bubbleRow = Ui.chipRow(this);
         boardCard.addView(bubbleRow, Ui.lpTop(this, 0, 6));
-        root.addView(boardCard, Ui.lpTop(this, 0, 14));
+        root.addView(boardCard, Ui.lpTop(this, 0, 12));
 
         // -------------------------------------------------- ABOUT
         LinearLayout about = Ui.card(this);
         about.addView(Ui.sectionTitle(this, "ABOUT"));
-        about.addView(Ui.text(this, "Chess Hint Panel 2.0", 13.5f, Ui.TEXT, true));
-        about.addView(Ui.text(this, "Stockfish 11 compiled for this phone (ARM64 / ARMv7 / x86_64).\n"
-                + "Runs fully offline - the board is read from the screen, the move comes from your own device.\n\n"
-                + "Strength: MAX is the strongest setting that exists in chess - about 3400+ Elo. "
-                + "No engine on earth reaches 8000 Elo; the strongest ever measured are ~3600, so MAX is already at that ceiling.",
+        about.addView(Ui.text(this, "Version 2.2  •  Stockfish 11", 13.5f, Ui.TEXT, true));
+        about.addView(Ui.text(this, "Native Stockfish 11 engine compiled for ARM64 / ARMv7 / x86_64.\n"
+                + "Runs 100% offline — the board is read directly on your device and every suggested move is strictly validated against chess rules.",
                 12f, Ui.TEXT_DIM, false), Ui.lpTop(this, 0, 6));
-        root.addView(about, Ui.lpTop(this, 0, 14));
+        root.addView(about, Ui.lpTop(this, 0, 12));
 
         return sv;
+    }
+
+    private LinearLayout.LayoutParams weightLeft() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        p.rightMargin = Ui.dp(this, 5);
+        return p;
+    }
+
+    private LinearLayout.LayoutParams weightRight() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        p.leftMargin = Ui.dp(this, 5);
+        return p;
     }
 
     // ---------------------------------------------------------------- actions
@@ -273,8 +276,20 @@ public class SettingsActivity extends Activity {
             }));
         }
 
+        // bubble size chips
+        bubbleRow.removeAllViews();
+        String[] bNames = {"Small", "Normal", "Large"};
+        for (int i = 0; i < 3; i++) {
+            final int size = i;
+            bubbleRow.addView(Ui.chip(this, bNames[i], prefs.bubbleSize() == i, v -> {
+                prefs.setBubbleSize(size);
+                push();
+                refreshAll();
+            }));
+        }
+
         android.graphics.Rect r = prefs.boardRect();
-        calibrationLabel.setText(r == null ? "Board frame: not set yet — use Fit frame or Auto detect."
-                : "Board frame: " + r.left + ", " + r.top + "  size " + r.width() + "px");
+        calibrationLabel.setText(r == null ? "Board frame: auto-detects when you open your game."
+                : "Board frame: " + r.left + ", " + r.top + "  (" + r.width() + " × " + r.height() + " px)");
     }
 }
