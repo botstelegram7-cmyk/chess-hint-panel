@@ -1115,6 +1115,12 @@ public class OverlayService extends Service implements
      *    via Vision.guessBoard(), followed by Chess.sanitize().
      */
     private void syncTrackerWithVision(Vision.Result res, int expectedSide) {
+        boolean detectedWb = Vision.detectWhiteBottom(res, prefs.whiteBottom());
+        if (detectedWb != prefs.whiteBottom()) {
+            prefs.setWhiteBottom(detectedWb);
+            track = null;
+            lastAutoPattern = null;
+        }
         boolean wb = prefs.whiteBottom();
         int targetSide = (expectedSide == Chess.WHITE || expectedSide == Chess.BLACK)
                 ? expectedSide : (wb ? Chess.WHITE : Chess.BLACK);
@@ -1144,6 +1150,7 @@ public class OverlayService extends Service implements
         }
 
         // 3. Reconcile previous known pieces with fresh Vision.guessBoard(res, wb)
+        //    ONLY if prevPos is within 1 move per side of res.colorPat (not a stale starting board!)
         Board guessed = Vision.guessBoard(res, wb);
         if (prevPos != null) {
             Board prevBoard = Chess.toBoard(prevPos, wb);
@@ -1152,32 +1159,123 @@ public class OverlayService extends Service implements
             for (int i = 0; i < 64; i++) {
                 int oldC = Board.isWhite(prevBoard.s[i]) ? 1 : (Board.isBlack(prevBoard.s[i]) ? 2 : 0);
                 int newC = res.colorPat[i];
-                if (oldC == 1 && newC == 1) {
-                    guessed.s[i] = prevBoard.s[i];
-                } else if (oldC == 2 && newC == 2) {
-                    guessed.s[i] = prevBoard.s[i];
-                }
                 if (oldC == 1 && newC != 1) { wFrom = i; wFromCnt++; }
                 if (oldC != 1 && newC == 1) { wTo = i; wToCnt++; }
                 if (oldC == 2 && newC != 2) { bFrom = i; bFromCnt++; }
                 if (oldC != 2 && newC == 2) { bTo = i; bToCnt++; }
             }
-            if (wFromCnt == 1 && wToCnt == 1 && wFrom >= 0 && wTo >= 0) {
-                byte moved = prevBoard.s[wFrom];
-                int rIdx = Board.rankIdxOf(wTo, wb);
-                if (moved == 1 && (rIdx == 0 || rIdx == 7)) moved = 5;
-                guessed.s[wTo] = moved;
-            }
-            if (bFromCnt == 1 && bToCnt == 1 && bFrom >= 0 && bTo >= 0) {
-                byte moved = prevBoard.s[bFrom];
-                int rIdx = Board.rankIdxOf(bTo, wb);
-                if (moved == 9 && (rIdx == 0 || rIdx == 7)) moved = 13;
-                guessed.s[bTo] = moved;
+            if (wFromCnt <= 1 && wToCnt <= 1 && bFromCnt <= 1 && bToCnt <= 1) {
+                for (int i = 0; i < 64; i++) {
+                    int oldC = Board.isWhite(prevBoard.s[i]) ? 1 : (Board.isBlack(prevBoard.s[i]) ? 2 : 0);
+                    int newC = res.colorPat[i];
+                    if (oldC != 0 && oldC == newC) {
+                        byte prevP = prevBoard.s[i];
+                        float pH = res.pieceHeight[i];
+                        // Do not overwrite if visual piece height strongly contradicts prevP (e.g. Pawn vs tall piece)
+                        if (pH > 0.1f && pH < 0.67f) {
+                            guessed.s[i] = (byte) (newC == 1 ? 1 : 9);
+                        } else if (pH > 0.74f && (prevP == 1 || prevP == 9)) {
+                            // keep guessed.s[i] (tall piece)
+                        } else {
+                            guessed.s[i] = prevP;
+                        }
+                    }
+                }
+                if (wFromCnt == 1 && wToCnt == 1 && wFrom >= 0 && wTo >= 0) {
+                    byte moved = prevBoard.s[wFrom];
+                    int rIdx = Board.rankIdxOf(wTo, wb);
+                    if (moved == 1 && (rIdx == 0 || rIdx == 7)) moved = 5;
+                    guessed.s[wTo] = moved;
+                }
+                if (bFromCnt == 1 && bToCnt == 1 && bFrom >= 0 && bTo >= 0) {
+                    byte moved = prevBoard.s[bFrom];
+                    int rIdx = Board.rankIdxOf(bTo, wb);
+                    if (moved == 9 && (rIdx == 0 || rIdx == 7)) moved = 13;
+                    guessed.s[bTo] = moved;
+                }
             }
         }
         Chess.Pos reconciled = Chess.fromBoard(guessed, wb, targetSide);
         if (track == null) track = new Track(reconciled, wb);
         else track.reset(reconciled);
+    }
+
+    /**
+     * Strictly verifies that a candidate UCI move is:
+     * 1. A legal move in `pos` for `userSide`,
+     * 2. Moving a square visually occupied by `userSide` to a square NOT occupied by `userSide`,
+     * 3. Visually clear along every intermediate square of any sliding ray (Bishop, Rook, Queen, 2-sq Pawn),
+     * 4. Visually consistent with the piece silhouette at `fromIdx` (no L-jumps from symmetric pieces,
+     *    no diagonal slides from Rooks, no orthogonal slides from Bishops, no long slides from Pawns).
+     */
+    private static boolean isVisuallyValidMove(Vision.Result res, Chess.Pos pos, String mv, boolean wb, int userSide) {
+        if (res == null || pos == null || mv == null || mv.length() < 4) return false;
+        String uci4 = mv.substring(0, 4);
+        int fromIdx = Board.squareFromName(uci4.substring(0, 2), wb);
+        int toIdx = Board.squareFromName(uci4.substring(2, 4), wb);
+        if (fromIdx < 0 || toIdx < 0 || fromIdx == toIdx) return false;
+
+        // 1. Must move user's own piece to a square not occupied by user's own piece
+        if (res.colorPat[fromIdx] != userSide || res.colorPat[toIdx] == userSide) return false;
+
+        // 2. Must be in Chess.legal(pos)
+        boolean inLegal = false;
+        for (Chess.Move lm : Chess.legal(pos)) {
+            if (lm.uci().substring(0, 4).equals(uci4)) {
+                inLegal = true;
+                break;
+            }
+        }
+        if (!inLegal) return false;
+
+        // 3. Visual ray-clearance check on the live screen (res.colorPat)
+        int r0 = fromIdx / 8, f0 = fromIdx % 8;
+        int r1 = toIdx / 8, f1 = toIdx % 8;
+        int dr = r1 - r0, df = f1 - f0;
+        int adr = Math.abs(dr), adf = Math.abs(df);
+        if ((adr == adf && adr > 1) || ((dr == 0 || df == 0) && (adr + adf > 1))) {
+            int sr = Integer.compare(dr, 0), sf = Integer.compare(df, 0);
+            int r = r0 + sr, f = f0 + sf;
+            while (r != r1 || f != f1) {
+                if (res.colorPat[r * 8 + f] != 0) return false; // blocked by a piece on screen!
+                r += sr;
+                f += sf;
+            }
+        }
+
+        // 4. Piece-type & silhouette consistency check
+        int fsq = Chess.sqFromName(uci4.substring(0, 2));
+        int piece = fsq >= 0 ? pos.cb[fsq] : 0;
+        int pt = piece & 7; // 1=P, 2=N, 3=B, 4=R, 5=Q, 6=K
+        int visType = Vision.guessType(res, fromIdx, userSide == Chess.WHITE) % 8;
+        float pH = res.pieceHeight[fromIdx];
+        float asym = res.asym[fromIdx];
+        float[] nb = res.bands[fromIdx];
+
+        if (adr * adf == 2) {
+            // Knight jump: must be a Knight in pos, not a short Pawn, and not a symmetric sliding piece
+            if (pt != 2) return false;
+            if (pH > 0.1f && pH < 0.68f) return false;
+            if (asym < 0.06f && visType != 2) return false;
+        } else if (pt == 1) {
+            // Pawn move: user is at the bottom of the screen, so pawns always move up (dr < 0)
+            if (dr >= 0) return false;
+            if (df == 0) {
+                if (res.colorPat[toIdx] != 0) return false;
+                if (dr == -2 && (r0 != 6 || res.colorPat[(r0 - 1) * 8 + f0] != 0)) return false;
+            } else if (adf == 1 && dr == -1) {
+                int tsq = Chess.sqFromName(uci4.substring(2, 4));
+                if (res.colorPat[toIdx] != (3 - userSide) && tsq != pos.epSq) return false;
+            } else {
+                return false;
+            }
+        } else if (adr > 1 || adf > 1) {
+            // Multi-square sliding move (Bishop, Rook, Queen) or Castling
+            if (pH > 0.1f && pH < 0.675f) return false; // visually a Pawn, cannot slide multiple squares
+            if (adr == adf && visType == 4 && nb[0] > 0.54f && asym < 0.07f) return false; // Rook cannot slide diagonally
+            if ((dr == 0 || df == 0) && visType == 3 && nb[0] < 0.34f && nb[1] < 0.42f) return false; // Bishop cannot slide orthogonally
+        }
+        return true;
     }
 
     // ==================================================================== hint
@@ -1267,15 +1365,14 @@ public class OverlayService extends Service implements
         }
         lastVisionResult = res;
 
+        syncTrackerWithVision(res, 0);
         final boolean wb = prefs.whiteBottom();
         final int userSide = wb ? Chess.WHITE : Chess.BLACK;
-
-        syncTrackerWithVision(res, userSide);
         lastAutoPattern = res.colorPat.clone();
         waitingForOpponent = false;
         hintSquareSig = null;
 
-        final Chess.Pos usePos = track.pos.copy();
+        Chess.Pos usePos = track.pos.copy();
         usePos.side = userSide;
         Chess.sanitize(usePos);
         String fen = usePos.fen();
@@ -1289,31 +1386,25 @@ public class OverlayService extends Service implements
         }
         String bm = engine.bestMove(fen, prefs.movetime(), prefs.elo());
         String mv = UciEngine.moveOf(bm);
+
+        // Strictly verify that the suggested move is 100% legal AND visually clear on the live screen
+        if (!isVisuallyValidMove(res, usePos, mv, wb, userSide)) {
+            // Re-sync directly from fresh visual piece silhouettes (in case tracker drifted) and re-query Stockfish
+            Board freshGuessed = Vision.guessBoard(res, wb);
+            usePos = Chess.fromBoard(freshGuessed, wb, userSide);
+            Chess.sanitize(usePos);
+            track.reset(usePos);
+            bm = engine.bestMove(usePos.fen(), Math.max(800, prefs.movetime() / 2), prefs.elo());
+            mv = UciEngine.moveOf(bm);
+        }
+
         final int depth = engine.depth, cp = engine.scoreCp, mate = engine.mateIn;
 
-        // Verify that the suggested move is 100% legal on the actual screen board
-        java.util.List<Chess.Move> legalMoves = Chess.legal(usePos);
-        boolean legalOk = false;
-        if (mv != null && mv.length() >= 4) {
-            int fIdx = Board.squareFromName(mv.substring(0, 2), wb);
-            int tIdx = Board.squareFromName(mv.substring(2, 4), wb);
-            if (fIdx >= 0 && tIdx >= 0 && res.colorPat[fIdx] == userSide && res.colorPat[tIdx] != userSide) {
-                for (Chess.Move lm : legalMoves) {
-                    String uci = lm.uci();
-                    if (uci.substring(0, 4).equals(mv.substring(0, 4))) {
-                        legalOk = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if (!legalOk) {
+        if (!isVisuallyValidMove(res, usePos, mv, wb, userSide)) {
             mv = null;
-            for (Chess.Move lm : legalMoves) {
+            for (Chess.Move lm : Chess.legal(usePos)) {
                 String uci = lm.uci();
-                int fIdx = Board.squareFromName(uci.substring(0, 2), wb);
-                int tIdx = Board.squareFromName(uci.substring(2, 4), wb);
-                if (fIdx >= 0 && tIdx >= 0 && res.colorPat[fIdx] == userSide && res.colorPat[tIdx] != userSide) {
+                if (isVisuallyValidMove(res, usePos, uci, wb, userSide)) {
                     mv = uci;
                     break;
                 }
@@ -1469,6 +1560,15 @@ public class OverlayService extends Service implements
         return 0;
     }
 
+    private static int countColorInRange(int[] pat, int from, int to, int color) {
+        if (pat == null) return 0;
+        int cnt = 0;
+        for (int i = Math.max(0, from); i < Math.min(pat.length, to); i++) {
+            if (pat[i] == color) cnt++;
+        }
+        return cnt;
+    }
+
     private void checkAuto() {
         if (destroyed || grab == null || busy) return;
         busy = true;
@@ -1576,10 +1676,27 @@ public class OverlayService extends Service implements
                 }
                 lastVisionResult = res;
 
-                int userSide = prefs.whiteBottom() ? Chess.WHITE : Chess.BLACK;
+                boolean detectedWb = Vision.detectWhiteBottom(res, prefs.whiteBottom());
+                if (detectedWb != prefs.whiteBottom()) {
+                    prefs.setWhiteBottom(detectedWb);
+                    track = null;
+                    lastAutoPattern = null;
+                }
+                boolean wb = prefs.whiteBottom();
+                int userSide = wb ? Chess.WHITE : Chess.BLACK;
                 int oppSide = 3 - userSide;
 
                 if (lastAutoPattern == null) {
+                    // If user is Black and White hasn't made move 1 yet (all 16 White pieces on rows 0..1), wait for White
+                    boolean whiteUnmovedAtTop = !wb && countColorInRange(res.colorPat, 0, 16, Chess.WHITE) == 16
+                            && countColorInRange(res.colorPat, 16, 64, Chess.WHITE) == 0;
+                    if (whiteUnmovedAtTop) {
+                        syncTrackerWithVision(res, Chess.WHITE);
+                        lastAutoPattern = res.colorPat.clone();
+                        waitingForOpponent = true;
+                        postSafe(() -> busy = false);
+                        return;
+                    }
                     postSafe(() -> {
                         busy = false;
                         requestHint(true);
@@ -1604,8 +1721,12 @@ public class OverlayService extends Service implements
                 if (mover == -1) {
                     // New game or board reset
                     syncTrackerWithVision(res, Chess.WHITE);
+                    wb = prefs.whiteBottom();
+                    userSide = wb ? Chess.WHITE : Chess.BLACK;
                     lastAutoPattern = res.colorPat.clone();
-                    waitingForOpponent = (userSide == Chess.BLACK);
+                    boolean whiteUnmovedAtTop = !wb && countColorInRange(res.colorPat, 0, 16, Chess.WHITE) == 16
+                            && countColorInRange(res.colorPat, 16, 64, Chess.WHITE) == 0;
+                    waitingForOpponent = (userSide == Chess.BLACK && whiteUnmovedAtTop);
                     if (!waitingForOpponent) {
                         postSafe(() -> {
                             busy = false;

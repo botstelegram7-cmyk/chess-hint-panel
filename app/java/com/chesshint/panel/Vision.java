@@ -25,6 +25,8 @@ public class Vision {
         public float[] conf = new float[64];    // certainty per square (0..1)
         public int[] centerRgb = new int[64];
         public float[] inkFrac = new float[64];
+        public float[] pieceHeight = new float[64];
+        public float[] asym = new float[64];
         public float[][] bands = new float[64][8];
         public float[] score = new float[64];
         public float[] dmax = new float[64];
@@ -41,98 +43,39 @@ public class Vision {
 
     /**
      * Finds the board on a screenshot.
-     * Works on a downscaled copy so a 1080x2340 screen never needs a 10 MB pixel array
-     * (that used to run low-RAM phones out of memory while the engine was also running).
+     * Scales proportionally (preserving exact 1:1 aspect ratio) to <= 720 px width so
+     * memory stays small and full-resolution alignment never distorts vertical coordinates.
      */
     public static Rect detect(Bitmap full) {
         if (full == null) return null;
         int W0 = full.getWidth(), H0 = full.getHeight();
         if (W0 < 64 || H0 < 64) return null;
 
-        // ---- stage 1: coarse search on a small copy
-        int tw = Math.min(W0, 480);
+        int tw = Math.min(W0, 720);
         int th = Math.max(64, Math.round(H0 * (tw / (float) W0)));
-        Bitmap small = null;
-        Rect coarse = null;
-        int[] px = null;
+        Bitmap work = null;
         try {
-            small = Bitmap.createScaledBitmap(full, tw, th, true);
-            px = new int[tw * th];
-            small.getPixels(px, 0, tw, 0, 0, tw, th);
+            work = (tw == W0 && th == H0) ? full : Bitmap.createScaledBitmap(full, tw, th, true);
+            int[] px = new int[tw * th];
+            work.getPixels(px, 0, tw, 0, 0, tw, th);
             Rect r = detect(px, tw, th);
-            if (r != null) {
-                float k = W0 / (float) tw;
-                coarse = new Rect(Math.round(r.left * k), Math.round(r.top * k),
-                        Math.round(r.right * k), Math.round(r.bottom * k));
-            }
+            if (r == null) return null;
+            if (tw == W0 && th == H0) return r;
+            float kx = W0 / (float) tw, ky = H0 / (float) th;
+            int left = Math.max(0, Math.round(r.left * kx));
+            int top = Math.max(0, Math.round(r.top * ky));
+            int side = Math.min(Math.round(r.width() * kx), Math.min(W0 - left, H0 - top));
+            return new Rect(left, top, left + side, top + side);
         } catch (Throwable ignored) {
-            coarse = null;
+            return null;
         } finally {
-            if (small != null && small != full) small.recycle();
-            px = null;
+            if (work != null && work != full) work.recycle();
         }
-        if (coarse == null) return null;
-
-        // ---- stage 2: precise alignment on a mid resolution crop of the real screenshot
-        return refineOnBitmap(full, coarse);
-    }
-
-    /** re-aligns a rough board rectangle at a workable resolution (~600 px) */
-    private static Rect refineOnBitmap(Bitmap full, Rect rough) {
-        int side = rough.width();
-        if (side < 64) return rough;
-        int pad = Math.max(6, side / 12);
-        int cx = Math.max(0, rough.left - pad), cy = Math.max(0, rough.top - pad);
-        int cw = Math.min(full.getWidth() - cx, side + 2 * pad);
-        int ch = Math.min(full.getHeight() - cy, side + 2 * pad);
-        if (cw < 64 || ch < 64) return rough;
-
-        Bitmap crop = null;
-        int[] px = null;
-        try {
-            crop = Bitmap.createBitmap(full, cx, cy, cw, ch);
-            int target = 600;
-            if (crop.getWidth() > target) {
-                Bitmap sc = Bitmap.createScaledBitmap(crop, target, target, true);
-                if (sc != crop) {
-                    crop.recycle();
-                    crop = sc;
-                }
-            }
-            int w = crop.getWidth(), h = crop.getHeight();
-            px = new int[w * h];
-            crop.getPixels(px, 0, w, 0, 0, w, h);
-            float k = w / (float) cw;
-            Rect seed = new Rect(Math.round((rough.left - cx) * k), Math.round((rough.top - cy) * k),
-                    Math.round((rough.left - cx) * k) + Math.round(side * k),
-                    Math.round((rough.top - cy) * k) + Math.round(side * k));
-            clampRect(seed, w, h);
-            Rect aligned = alignBoard(px, w, h, seed, Math.max(3, seed.width() / 8));
-            float back = cw / (float) w;
-            Rect out = new Rect(cx + Math.round(aligned.left * back), cy + Math.round(aligned.top * back),
-                    cx + Math.round(aligned.right * back), cy + Math.round(aligned.bottom * back));
-            if (out.left < 0) out.offset(-out.left, 0);
-            if (out.top < 0) out.offset(0, -out.top);
-            int s2 = Math.min(out.width(), Math.min(full.getWidth() - out.left, full.getHeight() - out.top));
-            return new Rect(out.left, out.top, out.left + s2, out.top + s2);
-        } catch (Throwable t) {
-            return rough;
-        } finally {
-            if (crop != null && crop != full) crop.recycle();
-            px = null;
-        }
-    }
-
-    private static void clampRect(Rect r, int w, int h) {
-        if (r.left < 0) r.offset(-r.left, 0);
-        if (r.top < 0) r.offset(0, -r.top);
-        if (r.right > w) r.offset(w - r.right, 0);
-        if (r.bottom > h) r.offset(0, h - r.bottom);
     }
 
     /**
      * Reads a board straight from a screenshot.
-     * Crops the board area and works at ~640 px, so the memory footprint stays small.
+     * Crops the exact board area and works at <= 720 px without altering the aligned rect.
      */
     public static Result read(Bitmap full, Rect rect) {
         Result res = new Result();
@@ -145,27 +88,22 @@ public class Vision {
         boolean owned = false;
         int[] px = null;
         try {
-            crop = Bitmap.createBitmap(full, c.left, c.top, c.width(), c.height());
+            int side0 = Math.min(c.width(), c.height());
+            crop = Bitmap.createBitmap(full, c.left, c.top, side0, side0);
             owned = crop != full;
-            int side = Math.min(crop.getWidth(), crop.getHeight());
-            int target = 640;
-            if (side > target) {
-                float sc = target / (float) side;
-                int nw = Math.max(64, Math.round(crop.getWidth() * sc));
-                int nh = Math.max(64, Math.round(crop.getHeight() * sc));
-                Bitmap scaled = Bitmap.createScaledBitmap(crop, nw, nh, true);
+            int target = 720;
+            if (side0 > target) {
+                Bitmap scaled = Bitmap.createScaledBitmap(crop, target, target, true);
                 if (scaled != crop) {
                     if (owned) crop.recycle();
                     crop = scaled;
                     owned = true;
                 }
             }
-            int w = crop.getWidth(), h = crop.getHeight();
-            px = new int[w * h];
-            crop.getPixels(px, 0, w, 0, 0, w, h);
-            Rect frame = new Rect(0, 0, Math.min(w, h), Math.min(w, h));
-            frame = alignBoard(px, w, h, frame, Math.max(2, frame.width() / 26));
-            res = read(px, w, h, frame);
+            int s = Math.min(crop.getWidth(), crop.getHeight());
+            px = new int[s * s];
+            crop.getPixels(px, 0, s, 0, 0, s, s);
+            res = read(px, s, s, new Rect(0, 0, s, s));
         } catch (Throwable t) {
             res = new Result();
         } finally {
@@ -311,7 +249,7 @@ public class Vision {
 
     /** contrast across the 7 internal vertical grid lines; sharp only when the frame sits on the board */
     private static float vLines(int[] px, int W, int H, int x0, int y0, int side) {
-        return vLines(px, W, H, x0, y0, side, 0.11f);
+        return vLines(px, W, H, x0, y0, side, 0.045f);
     }
 
     private static float vLines(int[] px, int W, int H, int x0, int y0, int side, float dFrac) {
@@ -335,7 +273,7 @@ public class Vision {
     }
 
     private static float hLines(int[] px, int W, int H, int x0, int y0, int side) {
-        return hLines(px, W, H, x0, y0, side, 0.11f);
+        return hLines(px, W, H, x0, y0, side, 0.045f);
     }
 
     private static float hLines(int[] px, int W, int H, int x0, int y0, int side, float dFrac) {
@@ -741,6 +679,8 @@ public class Vision {
         float[] centreLum = new float[64];
         float[][] bands = new float[64][8];
         float[] inkFrac = new float[64];
+        float[] pieceHeightArr = new float[64];
+        float[] asymArr = new float[64];
         int[] parity = new int[64];
 
         for (int r = 0; r < 8; r++)
@@ -757,36 +697,50 @@ public class Vision {
                 int corR = Math.round(bgCorner[0]), corG = Math.round(bgCorner[1]), corB = Math.round(bgCorner[2]);
                 cornerRgb[idx] = (corR << 16) | (corG << 8) | corB;
 
-                // --- middle region: the piece body
-                int mx0 = x0 + Math.round(wS * 0.20f), mx1 = x1 - Math.round(wS * 0.20f);
-                int my0 = y0 + Math.round(hS * 0.20f), my1 = y1 - Math.round(hS * 0.20f);
+                // --- piece body region: x in [22%..78%] excludes corner labels (8..1 / a..h);
+                //     y in [4%..94%] captures full piece height from crown tip to base even under +-6px shift
+                int mx0 = x0 + Math.round(wS * 0.22f), mx1 = x1 - Math.round(wS * 0.22f);
+                int my0 = y0 + Math.round(hS * 0.04f), my1 = y1 - Math.round(hS * 0.06f);
                 int sx0 = Math.max(0, mx0), sy0 = Math.max(0, my0);
                 int sx1 = Math.min(bw, mx1), sy1 = Math.min(bh, my1);
                 int bwI = sx1 - sx0, bhI = sy1 - sy0;
                 if (bwI < 3 || bhI < 3) { bwI = Math.max(1, bwI); bhI = Math.max(1, bhI); }
-                boolean[] mask = new boolean[Math.max(1, bwI * bhI)];
+                boolean[] rawMask = new boolean[Math.max(1, bwI * bhI)];
+                boolean[] silMask = new boolean[Math.max(1, bwI * bhI)];
+                boolean[] filledMask = new boolean[Math.max(1, bwI * bhI)];
                 float[] lumI = new float[Math.max(1, bwI * bhI)];
-                int[] bandCnt = new int[8], bandTot = new int[8];
+
+                // Central [20%..80%] vertical window for occupancy scoring (matches empty/dot immunity)
+                int cy0 = y0 + Math.round(hS * 0.20f), cy1 = y1 - Math.round(hS * 0.20f);
                 int tot = 0, ink = 0;
                 float dmax = 0;
-                long sr = 0, sg = 0, sb = 0, suml = 0, suml2 = 0;
+                long sr = 0, sg = 0, sb = 0;
+                double suml = 0, suml2 = 0;
                 int mid = 0;
                 for (int y = sy0; y < sy1; y++) {
-                    int band = Math.min(7, Math.max(0, (int) ((y - y0) / (float) hS * 8)));
+                    boolean inCoreY = (y >= cy0 && y < cy1);
                     for (int x = sx0; x < sx1; x++) {
                         int c = px[(rect.top + y) * w + rect.left + x];
                         int rr = (c >> 16) & 255, gg = (c >> 8) & 255, bb = c & 255;
                         float d = (Math.abs(rr - corR) + Math.abs(gg - corG) + Math.abs(bb - corB)) / 765f;
                         float l = (0.299f * rr + 0.587f * gg + 0.114f * bb) / 255f;
+                        float g = (x > 0 && x < bw - 1 && y > 0 && y < bh - 1) ? mag[y * bw + x] : 0f;
                         int bi = (y - sy0) * bwI + (x - sx0);
                         if (bi < lumI.length) {
                             lumI[bi] = l;
-                            if (d > 0.058f) { mask[bi] = true; ink++; }
+                            if (d > 0.055f || (d > 0.036f && g > 0.045f)) {
+                                rawMask[bi] = true;
+                                if (inCoreY) ink++;
+                            }
+                            if (d > 0.075f || (d > 0.052f && g > 0.065f)) {
+                                silMask[bi] = true;
+                            }
                         }
-                        if (d > dmax) dmax = d;
-                        bandTot[band]++;
-                        tot++;
-                        sr += rr; sg += gg; sb += bb; suml += l; suml2 += l * l; mid++;
+                        if (inCoreY) {
+                            if (d > dmax) dmax = d;
+                            tot++;
+                            sr += rr; sg += gg; sb += bb; suml += l; suml2 += l * l; mid++;
+                        }
                     }
                 }
                 if (mid == 0) mid = 1;
@@ -797,11 +751,99 @@ public class Vision {
                 float std = (float) Math.sqrt(Math.max(0, suml2 / mid - meanL * meanL));
                 f2[idx] = std;
 
-                // erode the ink mask several pixels deep: the outline ring, thin markers and
-                // dots disappear, only the piece BODY stays -> that gives the piece colour.
+                // Scanline silhouette fill: include all valid piece rows in the central [12%..90%]
+                // of bhI, and extend contiguously into the top 12% / bottom 10% margins so crown tips
+                // are captured while any disconnected adjacent-square border at y=0 or y=bhI-1 is ignored.
+                int minRowSpan = Math.max(3, Math.round(bwI * 0.14f));
+                int[] rowXL = new int[bhI];
+                int[] rowXR = new int[bhI];
+                boolean[] rowValid = new boolean[bhI];
+                int marginTop = Math.max(2, Math.round(bhI * 0.12f));
+                int marginBot = Math.min(bhI - 2, Math.round(bhI * 0.90f));
+                int pTop = bhI, pBot = -1, pLeft = bwI, pRight = -1;
+                for (int y = 0; y < bhI; y++) {
+                    int rowOff = y * bwI;
+                    int xL = -1, xR = -1;
+                    for (int x = 0; x < bwI; x++) {
+                        if (silMask[rowOff + x] && ((x > 0 && silMask[rowOff + x - 1]) || (x + 1 < bwI && silMask[rowOff + x + 1]))) {
+                            xL = x; break;
+                        }
+                    }
+                    for (int x = bwI - 1; x >= 0; x--) {
+                        if (silMask[rowOff + x] && ((x > 0 && silMask[rowOff + x - 1]) || (x + 1 < bwI && silMask[rowOff + x + 1]))) {
+                            xR = x; break;
+                        }
+                    }
+                    rowXL[y] = xL;
+                    rowXR[y] = xR;
+                    if (xL >= 0 && (xR - xL) >= minRowSpan) {
+                        rowValid[y] = true;
+                        if (y >= marginTop && y <= marginBot) {
+                            if (y < pTop) pTop = y;
+                            if (y > pBot) pBot = y;
+                        }
+                    }
+                }
+                int filledCore = 0;
+                if (pBot >= pTop) {
+                    for (int y = pTop - 1; y >= 0; y--) {
+                        if (rowValid[y]) pTop = y;
+                        else if (y > 0 && rowValid[y - 1]) pTop = y - 1;
+                        else break;
+                    }
+                    for (int y = pBot + 1; y < bhI; y++) {
+                        if (rowValid[y]) pBot = y;
+                        else if (y + 1 < bhI && rowValid[y + 1]) pBot = y + 1;
+                        else break;
+                    }
+                    for (int y = pTop; y <= pBot; y++) {
+                        if (!rowValid[y]) continue;
+                        int rowOff = y * bwI;
+                        int xL = rowXL[y], xR = rowXR[y];
+                        if (xL < pLeft) pLeft = xL;
+                        if (xR > pRight) pRight = xR;
+                        boolean inCoreY = (sy0 + y >= cy0 && sy0 + y < cy1);
+                        for (int x = xL; x <= xR; x++) {
+                            filledMask[rowOff + x] = true;
+                            if (inCoreY) filledCore++;
+                        }
+                    }
+                }
+
+                // Shift-invariant piece height, 8-band profile over [pTop..pBot], and L/R asymmetry
+                if (pBot > pTop + 3 && pRight > pLeft + 2) {
+                    int ph = pBot - pTop + 1;
+                    pieceHeightArr[idx] = ph / (float) hS;
+                    for (int b = 0; b < 8; b++) {
+                        int by0 = pTop + (b * ph) / 8;
+                        int by1 = Math.max(by0 + 1, pTop + ((b + 1) * ph) / 8);
+                        int bCnt = 0, bTot = 0;
+                        for (int y = by0; y < by1 && y < bhI; y++) {
+                            int rowOff = y * bwI;
+                            for (int x = 0; x < bwI; x++) {
+                                bTot++;
+                                if (filledMask[rowOff + x]) bCnt++;
+                            }
+                        }
+                        bands[idx][b] = bTot > 0 ? bCnt / (float) bTot : 0f;
+                    }
+                    int asymDiff = 0, asymTot = 0;
+                    for (int y = pTop; y <= pBot; y++) {
+                        int rowOff = y * bwI;
+                        for (int x = pLeft; x <= pRight; x++) {
+                            asymTot++;
+                            int mx = pLeft + pRight - x;
+                            if (filledMask[rowOff + x] != filledMask[rowOff + mx]) asymDiff++;
+                        }
+                    }
+                    asymArr[idx] = asymTot > 0 ? asymDiff / (float) asymTot : 0f;
+                }
+
+                // Erode the FILLED silhouette mask: outline rings disappear and the true interior
+                // body of the piece survives, even when the piece interior matches the square colour.
                 int er = Math.max(2, Math.min(4, Math.round(sqw * 0.030f)));
-                boolean[] cur = mask;
-                boolean[] tmp = new boolean[mask.length];
+                boolean[] cur = filledMask.clone();
+                boolean[] tmp = new boolean[cur.length];
                 for (int it = 0; it < er; it++) {
                     java.util.Arrays.fill(tmp, false);
                     for (int y = 1; y < bhI - 1; y++)
@@ -814,35 +856,32 @@ public class Vision {
                 }
                 int ero = 0;
                 double bodyAcc = 0;
-                for (int i = 0; i < cur.length; i++)
-                    if (cur[i]) { ero++; bodyAcc += lumI[i]; }
-                float inkF = tot > 0 ? ink / (float) tot : 0f;
+                for (int y = 0; y < bhI; y++) {
+                    boolean inCoreY = (sy0 + y >= cy0 && sy0 + y < cy1);
+                    int rowOff = y * bwI;
+                    for (int x = 0; x < bwI; x++) {
+                        if (cur[rowOff + x] && inCoreY) {
+                            ero++;
+                            bodyAcc += lumI[rowOff + x];
+                        }
+                    }
+                }
+                float rawInkF = tot > 0 ? ink / (float) tot : 0f;
+                float filledF = tot > 0 ? filledCore / (float) tot : 0f;
+                float inkF = Math.max(rawInkF, filledF * 0.85f);
                 float erodeF = tot > 0 ? ero / (float) tot : 0f;
-                inkFrac[idx] = inkF;                                           // true ink fraction for type guess
-                f3[idx] = 0.5f * inkF + 0.5f * Math.min(1f, erodeF * 2.5f);    // occupancy feature
+                inkFrac[idx] = inkF;
+                f3[idx] = 0.5f * inkF + 0.5f * Math.min(1f, erodeF * 2.5f);
                 dmaxArr[idx] = dmax;
 
                 float bodyLum = meanL;
                 if (ero >= 3) bodyLum = (float) (bodyAcc / ero);
                 else if (ink > 3) {
-                    // no interior survived - fall back to the mean of all ink pixels
                     double a = 0; int n = 0;
-                    for (int k = 0; k < mask.length; k++) if (mask[k]) { a += lumI[k]; n++; }
+                    for (int k = 0; k < rawMask.length; k++) if (rawMask[k]) { a += lumI[k]; n++; }
                     if (n > 0) bodyLum = (float) (a / n);
                 }
                 inkLum[idx] = bodyLum;
-                for (int y = sy0; y < sy1; y++) {
-                    int band = Math.min(7, Math.max(0, (int) ((y - y0) / (float) hS * 8)));
-                    for (int x = sx0; x < sx1; x++) {
-                        int c = px[(rect.top + y) * w + rect.left + x];
-                        int rr = (c >> 16) & 255, gg = (c >> 8) & 255, bb = c & 255;
-                        float d = (Math.abs(rr - corR) + Math.abs(gg - corG) + Math.abs(bb - corB)) / 765f;
-                        if (d > 0.058f) bandCnt[band]++;
-                    }
-                }
-                for (int b = 0; b < 8; b++) bands[idx][b] = bandTot[b] > 0 ? bandCnt[b] / (float) bandTot[b] : 0f;
-
-                f2[idx] = std;
 
                 float gsum = 0; int gcnt = 0;
                 for (int y = y0 + Math.round(hS * 0.14f); y < y1 - Math.round(hS * 0.14f); y++) {
@@ -870,14 +909,14 @@ public class Vision {
         // At least 32 squares on a chess board are always empty; sortedScores[26] is a guaranteed empty square
         float emptyFloor = sortedScores[26];
         float peakScore = sortedScores[61];
-        float gapThr = emptyFloor + Math.max(0.14f, (peakScore - emptyFloor) * 0.25f);
+        float gapThr = emptyFloor + Math.max(0.12f, (peakScore - emptyFloor) * 0.22f);
         float thr = Math.min(otsu(score), gapThr);
         int occ = 0;
-        for (int i = 0; i < 64; i++) if (score[i] > thr && dmaxArr[i] > 0.24f) occ++;
+        for (int i = 0; i < 64; i++) if (score[i] > thr && dmaxArr[i] > 0.20f) occ++;
         if (occ > 32) {                       // a chess board never has more than 32 pieces
             thr = (sortedScores[31] + sortedScores[32]) * 0.5f;
             occ = 0;
-            for (int i = 0; i < 64; i++) if (score[i] > thr && dmaxArr[i] > 0.24f) occ++;
+            for (int i = 0; i < 64; i++) if (score[i] > thr && dmaxArr[i] > 0.20f) occ++;
         }
 
         // ---------------- empty-square colours of both parities (for white/black decision)
@@ -907,18 +946,15 @@ public class Vision {
         // Also refine lmid using the occupied pieces' own luminance range when both colours are present
         if (occ >= 4) {
             float minPL = 1f, maxPL = 0f;
-            float[] occLums = new float[occ];
-            int k = 0;
             for (int i = 0; i < 64; i++) {
-                if (score[i] > thr && dmaxArr[i] > 0.24f && k < occ) {
-                    occLums[k++] = inkLum[i];
+                if (score[i] > thr && dmaxArr[i] > 0.20f) {
                     if (inkLum[i] < minPL) minPL = inkLum[i];
                     if (inkLum[i] > maxPL) maxPL = inkLum[i];
                 }
             }
             if (maxPL - minPL > 0.22f) {
                 float pMid = (minPL + maxPL) * 0.5f;
-                lmid = 0.45f * lmid + 0.55f * pMid;
+                lmid = 0.40f * lmid + 0.60f * pMid;
             }
         }
 
@@ -930,14 +966,14 @@ public class Vision {
         }
 
         for (int i = 0; i < 64; i++) {
-            // a piece covers a real part of the square AND contains a strongly contrasting pixel;
-            // that is what separates a piece from a soft highlight or a move dot.
-            boolean occupied = score[i] > thr && dmaxArr[i] > 0.24f && inkFrac[i] > 0.08f;
+            boolean occupied = score[i] > thr && dmaxArr[i] > 0.20f && inkFrac[i] > 0.08f && pieceHeightArr[i] > 0.36f;
             res.colorPat[i] = occupied ? (inkLum[i] > lmid ? 1 : 2) : 0;
             res.conf[i] = Math.abs(score[i] - thr) / Math.max(1e-4f, Math.max(thr, 0.25f));
             res.centerRgb[i] = centreRgb[i];
             res.inkLum[i] = inkLum[i];
             res.inkFrac[i] = inkFrac[i];
+            res.pieceHeight[i] = pieceHeightArr[i];
+            res.asym[i] = asymArr[i];
             res.bands[i] = bands[i];
             res.score[i] = score[i];
             res.dmax[i] = dmaxArr[i];
@@ -966,19 +1002,47 @@ public class Vision {
         return res;
     }
 
+    /**
+     * Automatically detects whether the user's pieces at the bottom of the screen are White (true)
+     * or Black (false) by comparing piece colours on the bottom 3 ranks vs top 3 ranks.
+     */
+    public static boolean detectWhiteBottom(Result res, boolean fallback) {
+        if (res == null || !res.ok) return fallback;
+        int totalOcc = 0;
+        for (int i = 0; i < 64; i++) if (res.colorPat[i] != 0) totalOcc++;
+        if (totalOcc < 14) return fallback;
+        int whiteBottomScore = 0, blackBottomScore = 0;
+        for (int r = 0; r < 8; r++) {
+            int weight = (r == 0 || r == 7) ? 2 : 1;
+            for (int f = 0; f < 8; f++) {
+                int c = res.colorPat[r * 8 + f];
+                if (c == 0) continue;
+                if (r >= 5) {
+                    if (c == 1) whiteBottomScore += weight;
+                    else if (c == 2) blackBottomScore += weight;
+                } else if (r <= 2) {
+                    if (c == 2) whiteBottomScore += weight;
+                    else if (c == 1) blackBottomScore += weight;
+                }
+            }
+        }
+        if (whiteBottomScore >= blackBottomScore + 8) return true;
+        if (blackBottomScore >= whiteBottomScore + 8) return false;
+        return fallback;
+    }
+
     // =====================================================================
-    //  3) rough piece type guess (used to seed the editor / mid-game start)
+    //  3) shift-invariant piece type classification
     // =====================================================================
 
     public static int guessType(Result res, int idx, boolean isWhite) {
+        float pH = res.pieceHeight[idx];
+        float asym = res.asym[idx];
         float ink = res.inkFrac[idx];
-        float[] b = res.bands[idx];
-        // Bands 1..6 cover the vertical profile of the piece from top (b[1]) to base (b[6])
-        float b1 = b[1], b2 = b[2], b3 = b[3], b4 = b[4], b5 = b[5], b6 = Math.max(0.10f, b[6]);
-        float mid34 = (b3 + b4) * 0.5f;
+        float[] nb = res.bands[idx];
 
-        // Compute board-adaptive pawn ink reference (25th percentile of occupied inkFrac)
-        float pawnRef = 0.28f;
+        // Compute board-adaptive pawn height & ink references
+        float pawnInkRef = 0.36f;
         int occCnt = 0;
         float[] occInks = new float[64];
         for (int i = 0; i < 64; i++) {
@@ -986,36 +1050,36 @@ public class Vision {
         }
         if (occCnt >= 6) {
             java.util.Arrays.sort(occInks, 0, occCnt);
-            pawnRef = occInks[Math.min(occCnt - 1, occCnt / 4)];
+            pawnInkRef = occInks[Math.min(occCnt - 1, occCnt / 4)];
         }
 
         int type;
-        // 1) PAWN: shortest piece (very little ink in top band b[1], narrow mid-body, smallest area)
-        if ((b1 < 0.21f && mid34 < 0.55f) || (b1 < b6 * 0.25f && ink <= pawnRef * 1.18f)) {
+        // 1) PAWN: shortest height (pH < 0.675) or narrow middle silhouette (nb[3] < 0.58 && nb[4] < 0.52)
+        if (pH < 0.675f || (nb[3] < 0.58f && nb[4] < 0.52f) || (pH < 0.695f && ink <= pawnInkRef * 1.12f)) {
             type = 1; // pawn
         }
-        // 2) BISHOP: pointed mitre tip (modest b[1], narrow upper-neck b[2], wider belly b[4])
-        else if (b1 < 0.36f && b2 < 0.60f && b4 > b2 + 0.12f) {
-            type = 3; // bishop
-        }
-        // 3) ROOK: wide flat battlements at top (b[1], b[2]) with narrower cylindrical waist (b[3], b[4])
-        else if (b1 > 0.52f && b2 > mid34 + 0.06f) {
+        // 2) ROOK: flat wide battlements at top (nb[0] > 0.50, nb[1] wider than waist nb[3], nb[4])
+        else if (nb[0] > 0.50f && nb[1] > nb[3] + 0.09f && nb[1] > nb[4] + 0.07f) {
             type = 4; // rook
         }
-        // 4) KNIGHT: horse head widest at b[3] and narrowing down the neck (b[3] > b[4] > b[5])
-        else if (b2 > 0.70f && b3 > b4 + 0.07f && b4 > b5) {
+        // 3) BISHOP: narrow pointed mitre at top (nb[0] < 0.34, nb[1] < 0.40) widening into belly nb[4]
+        else if (nb[0] < 0.34f && nb[1] < 0.40f && nb[2] < 0.68f && nb[4] > nb[1] + 0.34f) {
+            type = 3; // bishop
+        }
+        // 4) KING: narrow cross at top (nb[0] < 0.42, nb[1] < 0.56) jumping sharply to wide crown lobes (nb[2] > 0.76), mirror-symmetric
+        else if (nb[0] < 0.42f && nb[1] < 0.56f && nb[2] > 0.76f && (nb[2] - nb[1]) > 0.24f && asym < 0.06f) {
+            type = 6; // king
+        }
+        // 5) KNIGHT: strong left-right asymmetry (horse head in profile) or peak at nb[3] narrowing at neck nb[5]
+        else if (asym > 0.110f || (nb[0] < 0.45f && nb[3] > 0.88f && nb[3] > nb[5] + 0.10f)) {
             type = 2; // knight
         }
-        // 5) KING vs QUEEN: King has cross at top (moderate b[1]) + thick upper & lower body (b[2], b[5] > 0.80)
-        else if (b1 < 0.50f && b2 > 0.78f && b5 > 0.80f) {
-            type = 6; // king
-        } else if (b3 > 0.78f && b4 >= b3 - 0.06f) {
+        // 6) QUEEN: wide multi-pointed crown (nb[0..1] >= 0.42) and very wide body (nb[3..4] > 0.82)
+        else if (nb[3] > 0.82f && nb[4] > 0.82f) {
             type = 5; // queen
-        } else if (ink < pawnRef * 1.22f) {
-            type = 1; // pawn fallback
-        } else if (b2 > mid34) {
+        } else if (nb[1] > nb[3] + 0.06f) {
             type = 4; // rook fallback
-        } else if (b3 > b4) {
+        } else if (asym > 0.135f) {
             type = 2; // knight fallback
         } else {
             type = 3; // bishop fallback
@@ -1025,8 +1089,9 @@ public class Vision {
 
     /**
      * Builds a valid Board from a screen Result when joining a game mid-way.
-     * Pieces still on their starting squares keep their starting identity; moved pieces are
-     * inferred from shape features while guaranteeing exactly one white king and one black king.
+     * Home squares only keep their starting identity when guessType agrees with their silhouette,
+     * preventing castled Rooks/Kings or moved Bishops/Knights from being mislabelled.
+     * Crucially, symmetric sliding pieces (Bishop/Rook/Queen) are NEVER turned into Knights.
      */
     public static Board guessBoard(Result res, boolean whiteBottom) {
         Board out = new Board();
@@ -1034,46 +1099,60 @@ public class Vision {
         Board home = Board.starting(whiteBottom);
         boolean hasWK = false, hasBK = false;
 
-        // Pass 1: keep pieces on their original home squares if the colour and rough shape match
+        // Pass 1: keep pieces on their original home squares ONLY if colour and silhouette agree
         for (int i = 0; i < 64; i++) {
             int col = res.colorPat[i];
             if (col == 0) continue;
             int hp = home.s[i];
-            int rank = Board.rankIdxOf(i, whiteBottom);
             if (col == 1 && Board.isWhite(hp)) {
-                // On rank 1, only keep home identity if it wasn't replaced by a different piece
-                if (rank == 0 && hp != 6) {
-                    int gt = guessType(res, i, true);
-                    if (hp == 4 && gt != 4) continue;
+                int gt = guessType(res, i, true);
+                // Pawns on rank 2 stay pawns if short; back-rank pieces stay hp if gt matches or both are tall crown pieces
+                if (hp == 1 && (gt == 1 || res.pieceHeight[i] < 0.685f)) {
+                    out.s[i] = 1;
+                } else if (hp > 1 && gt == hp) {
+                    out.s[i] = (byte) hp;
+                    if (hp == 6) hasWK = true;
+                } else if (hp == 6 && res.pieceHeight[i] >= 0.72f && res.asym[i] < 0.13f) {
+                    out.s[i] = 6;
+                    hasWK = true;
                 }
-                out.s[i] = (byte) hp;
-                if (hp == 6) hasWK = true;
             } else if (col == 2 && Board.isBlack(hp)) {
-                if (rank == 7 && hp != 14) {
-                    int gt = guessType(res, i, false) - 8;
-                    if (hp == 12 && gt != 4) continue;
+                int gt = guessType(res, i, false) - 8;
+                int hpBase = hp - 8;
+                if (hpBase == 1 && (gt == 1 || res.pieceHeight[i] < 0.685f)) {
+                    out.s[i] = 9;
+                } else if (hpBase > 1 && gt == hpBase) {
+                    out.s[i] = (byte) hp;
+                    if (hp == 14) hasBK = true;
+                } else if (hp == 14 && res.pieceHeight[i] >= 0.72f && res.asym[i] < 0.13f) {
+                    out.s[i] = 14;
+                    hasBK = true;
                 }
-                out.s[i] = (byte) hp;
-                if (hp == 14) hasBK = true;
             }
         }
 
-        // Check common castled king squares (g1/c1 for white, g8/c8 for black)
+        // Check common castled king squares (g1/c1 for white, g8/c8 for black) when king has left e1/e8
         if (!hasWK) {
             int g1 = Board.squareFromName("g1", whiteBottom);
             int c1 = Board.squareFromName("c1", whiteBottom);
-            if (g1 >= 0 && res.colorPat[g1] == 1 && out.s[g1] == 0) { out.s[g1] = 6; hasWK = true; }
-            else if (c1 >= 0 && res.colorPat[c1] == 1 && out.s[c1] == 0) { out.s[c1] = 6; hasWK = true; }
+            if (g1 >= 0 && res.colorPat[g1] == 1 && out.s[g1] == 0 && res.pieceHeight[g1] >= 0.70f && res.asym[g1] < 0.14f) {
+                out.s[g1] = 6; hasWK = true;
+            } else if (c1 >= 0 && res.colorPat[c1] == 1 && out.s[c1] == 0 && res.pieceHeight[c1] >= 0.70f && res.asym[c1] < 0.14f) {
+                out.s[c1] = 6; hasWK = true;
+            }
         }
         if (!hasBK) {
             int g8 = Board.squareFromName("g8", whiteBottom);
             int c8 = Board.squareFromName("c8", whiteBottom);
-            if (g8 >= 0 && res.colorPat[g8] == 2 && out.s[g8] == 0) { out.s[g8] = 14; hasBK = true; }
-            else if (c8 >= 0 && res.colorPat[c8] == 2 && out.s[c8] == 0) { out.s[c8] = 14; hasBK = true; }
+            if (g8 >= 0 && res.colorPat[g8] == 2 && out.s[g8] == 0 && res.pieceHeight[g8] >= 0.70f && res.asym[g8] < 0.14f) {
+                out.s[g8] = 14; hasBK = true;
+            } else if (c8 >= 0 && res.colorPat[c8] == 2 && out.s[c8] == 0 && res.pieceHeight[c8] >= 0.70f && res.asym[c8] < 0.14f) {
+                out.s[c8] = 14; hasBK = true;
+            }
         }
 
-        // Pass 2: assign moved pieces while respecting standard piece-count limits
-        // (prevents bold piece themes from turning 15 squares into Queens)
+        // Pass 2: assign remaining pieces while respecting standard piece-count limits
+        // and NEVER converting a symmetric sliding piece (B/R/Q) into a Knight (N) or a tall piece into a Pawn!
         int[] wCnt = new int[7], bCnt = new int[7];
         int wTot = 0, bTot = 0;
         for (int i = 0; i < 64; i++) {
@@ -1099,9 +1178,17 @@ public class Vision {
             }
             if (base == 1 && (rank == 0 || rank == 7)) base = 3; // no pawns on 1st/8th rank
             if (cnt[base] >= maxPiece[base]) {
-                int[] fallbackOrder = (rank == 0 || rank == 7)
-                        ? new int[]{4, 3, 2, 5}
-                        : new int[]{1, 2, 3, 4, 5};
+                // Choose a safe fallback that preserves movement geometry:
+                // - Knights (2) only fall back to Bishop (3) or Pawn (1)
+                // - Sliding pieces (3, 4, 5) ONLY fall back to other sliding pieces (3, 4, 5), NEVER to Knight (2)!
+                int[] fallbackOrder;
+                if (base == 1) {
+                    fallbackOrder = new int[]{3, 2, 4, 5};
+                } else if (base == 2) {
+                    fallbackOrder = (rank == 0 || rank == 7) ? new int[]{3, 4, 5} : new int[]{3, 1, 4, 5};
+                } else {
+                    fallbackOrder = new int[]{3, 4, 5};
+                }
                 for (int fb : fallbackOrder) {
                     if (cnt[fb] < maxPiece[fb]) { base = fb; break; }
                 }

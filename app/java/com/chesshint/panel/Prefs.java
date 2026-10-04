@@ -18,20 +18,20 @@ public class Prefs {
     // ------------------------------------------------------------- calibration
 
     public Rect boardRect() {
-        int x = sp.getInt("bx_v2", Integer.MIN_VALUE);
+        int x = sp.getInt("bx_v3", Integer.MIN_VALUE);
         if (x == Integer.MIN_VALUE) return null;
-        int y = sp.getInt("by_v2", 0), s = sp.getInt("bs_v2", 0);
+        int y = sp.getInt("by_v3", 0), s = sp.getInt("bs_v3", 0);
         if (s < 64) return null;
         return new Rect(x, y, x + s, y + s);
     }
 
     public void setBoardRect(Rect r) {
-        sp.edit().putInt("bx_v2", r.left).putInt("by_v2", r.top).putInt("bs_v2", r.width()).apply();
+        sp.edit().putInt("bx_v3", r.left).putInt("by_v3", r.top).putInt("bs_v3", r.width()).apply();
     }
 
     public boolean hasRect() { return boardRect() != null; }
 
-    public void clearBoardRect() { sp.edit().remove("bx_v2").remove("by_v2").remove("bs_v2").apply(); }
+    public void clearBoardRect() { sp.edit().remove("bx_v3").remove("by_v3").remove("bs_v3").apply(); }
 
     // ------------------------------------------------------------- game
 
@@ -44,10 +44,10 @@ public class Prefs {
 
     /** -1 = maximum strength, else a target Elo (1350..2850) */
     public int elo() { return sp.getInt("elo", -1); }
-    public void setElo(int e) { sp.edit().putInt("elo", e).apply(); }
+    public void setElo(int e) { sp.edit().putBoolean("elo_set", true).putInt("elo", e).apply(); }
 
-    public int movetime() { return sp.getInt("mt", 1000); }
-    public void setMovetime(int ms) { sp.edit().putInt("mt", ms).apply(); }
+    public int movetime() { return sp.getInt("mt_v3", 1800); }
+    public void setMovetime(int ms) { sp.edit().putInt("mt_v3", ms).apply(); }
 
     // ------------------------------------------------------------- appearance
 
